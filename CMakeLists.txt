@@ -29,6 +29,7 @@ target_compile_options(NaughtyBearRecompLib PRIVATE
 
 # Logging stubs for every import the runtime does not implement yet.
 file(GLOB_RECURSE RUNTIME_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/*.cpp)
+list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "src/gpu/fallback/")
 
 set(IMPORT_STUBS ${CMAKE_BINARY_DIR}/import_stubs.cpp)
 add_custom_command(
@@ -42,6 +43,21 @@ find_package(SDL2 REQUIRED)
 # plume: the renderer abstraction Unleashed Recompiled uses, here on Vulkan through SDL.
 set(SDL_VULKAN_ENABLED ON CACHE BOOL "" FORCE)
 add_subdirectory(thirdparty/plume EXCLUDE_FROM_ALL)
+
+# zstd and smol-v decode the shader cache; both come with XenosRecomp.
+set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+add_subdirectory(tools/XenosRecomp/thirdparty/zstd/build/cmake EXCLUDE_FROM_ALL)
+add_library(smolv STATIC tools/XenosRecomp/thirdparty/smol-v/source/smolv.cpp)
+target_include_directories(smolv PUBLIC tools/XenosRecomp/thirdparty/smol-v/source)
+
+# The translated shaders (tools/translate_shaders.sh), or an empty cache before that.
+set(SHADER_CACHE ${CMAKE_SOURCE_DIR}/build/shaders/shader_cache.cpp)
+if (NOT EXISTS ${SHADER_CACHE})
+    message(WARNING "No shader cache yet; run tools/translate_shaders.sh. Nothing will be drawn.")
+    set(SHADER_CACHE ${CMAKE_SOURCE_DIR}/src/gpu/fallback/shader_cache_empty.cpp)
+endif()
 
 add_library(o1heap STATIC thirdparty/o1heap/o1heap.c)
 target_include_directories(o1heap PUBLIC thirdparty/o1heap)
@@ -59,13 +75,15 @@ if (NB_TRACE_D3D)
 endif()
 
 # The runtime: ported from Unleashed Recompiled (GPL-3.0), see NOTICE.md.
-add_executable(NaughtyBear ${RUNTIME_SOURCES} ${IMPORT_STUBS} ${TRACE_WRAPPERS})
+add_executable(NaughtyBear ${RUNTIME_SOURCES} ${IMPORT_STUBS} ${TRACE_WRAPPERS} ${SHADER_CACHE})
 if (NB_TRACE_D3D)
     target_compile_definitions(NaughtyBear PRIVATE NB_TRACE_D3D)
 endif()
 target_include_directories(NaughtyBear PRIVATE
     src
+    src/gpu
     thirdparty/unordered_dense/include
-    tools/XenonRecomp/thirdparty/xxHash)
+    tools/XenonRecomp/thirdparty/xxHash
+    tools/XenosRecomp/thirdparty/zstd/lib)
 target_precompile_headers(NaughtyBear PRIVATE src/stdafx.h)
-target_link_libraries(NaughtyBear PRIVATE NaughtyBearRecompLib XenonUtils o1heap fmt::fmt xxHash::xxhash plume SDL2::SDL2)
+target_link_libraries(NaughtyBear PRIVATE NaughtyBearRecompLib XenonUtils o1heap fmt::fmt xxHash::xxhash plume SDL2::SDL2 libzstd_static smolv)
