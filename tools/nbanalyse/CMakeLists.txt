@@ -26,3 +26,6 @@ target_link_libraries(funcinfo PRIVATE XenonUtils fmt::fmt)
 
 add_executable(eh_handlers eh_handlers.cpp)
 target_link_libraries(eh_handlers PRIVATE XenonUtils fmt::fmt)
+
+add_executable(peek peek.cpp)
+target_link_libraries(peek PRIVATE XenonUtils fmt::fmt)

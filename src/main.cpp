@@ -1,112 +1,140 @@
-// Minimal test host: loads the game's executable into guest memory and runs the
-// recompiled entry point. Kernel imports are logging stubs for now.
+// Naughty Bear runtime entry point. Boot sequence adapted from Unleashed Recompiled's
+// main.cpp (KiSystemStartup / LdrLoadModule), without its installer, UI and mod loader.
 
-#include "import_stub.h"
+#include <stdafx.h>
+#include <apu/audio.h>
+#include <cpu/guest_thread.h>
+#include <kernel/function.h>
+#include <kernel/heap.h>
+#include <kernel/memory.h>
+#include <kernel/xam.h>
+#include <kernel/xex_modules.h>
+#include <os/logger.h>
+#include <user/paths.h>
 
 #include <file.h>
 #include <image.h>
+#include <xex.h>
 
-#include <algorithm>
 #include <csignal>
 #include <malloc.h>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <mutex>
-#include <set>
-#include <string>
-#include <sys/mman.h>
 
-namespace
+Memory g_memory;
+Heap g_userHeap;
+
+static std::filesystem::path g_gamePath;
+
+std::filesystem::path& GetGamePath()
 {
-    constexpr size_t kGuestMemorySize = 0x100000000ull; // the full 32-bit guest address space
-
-    // Where the test host places the main thread's stack and processor control block.
-    constexpr uint32_t kStackBase = 0x70000000;
-    constexpr uint32_t kStackSize = 0x100000;
-    constexpr uint32_t kPcrAddress = 0x7F000000;
-    constexpr uint32_t kThreadAddress = 0x7F001000;
-
-    uint8_t* gBase = nullptr;
-
-    void OnCrash(int sig, siginfo_t* info, void*)
-    {
-        auto addr = reinterpret_cast<uintptr_t>(info->si_addr);
-        auto base = reinterpret_cast<uintptr_t>(gBase);
-        if (addr >= base && addr < base + kGuestMemorySize)
-            fprintf(stderr, "\n[nb] signal %d: guest memory access at 0x%08llX\n", sig, (unsigned long long)(addr - base));
-        else
-            fprintf(stderr, "\n[nb] signal %d: host address %p\n", sig, info->si_addr);
-        _exit(128 + sig);
-    }
+    return g_gamePath;
 }
 
-void nb::ReportStub(const char* name, const PPCContext& ctx)
+std::filesystem::path GetSavePath(bool checkForMods)
 {
-    static std::mutex mutex;
-    static std::set<std::string> seen;
-    std::lock_guard lock(mutex);
-    if (seen.insert(name).second)
+    return std::filesystem::current_path() / "save";
+}
+
+static void OnCrash(int sig, siginfo_t* info, void*)
+{
+    auto addr = reinterpret_cast<uintptr_t>(info->si_addr);
+    auto base = reinterpret_cast<uintptr_t>(g_memory.base);
+    if (addr >= base && addr < base + PPC_MEMORY_SIZE)
+        fprintf(stderr, "\n[nb] signal %d: guest memory access at 0x%08llX\n", sig, (unsigned long long)(addr - base));
+    else
+        fprintf(stderr, "\n[nb] signal %d: host address %p\n", sig, info->si_addr);
+    _exit(128 + sig);
+}
+
+static void InstallCrashHandler()
+{
+    struct sigaction sa{};
+    sa.sa_sigaction = OnCrash;
+    sa.sa_flags = SA_SIGINFO;
+    for (int sig : { SIGSEGV, SIGBUS, SIGILL, SIGTRAP, SIGFPE })
+        sigaction(sig, &sa, nullptr);
+}
+
+static void KiSystemStartup()
+{
+    g_userHeap.Init();
+
+    // The game reads its data from the "game:" and "D:" roots.
+    const auto gameContent = XamMakeContent(XCONTENTTYPE_RESERVED, "Game");
+    const std::string gamePath = (const char*)GetGamePath().u8string().c_str();
+    XamRegisterContent(gameContent, gamePath);
+    XamContentCreateEx(0, "game", &gameContent, OPEN_EXISTING, nullptr, nullptr, 0, 0, nullptr);
+    XamContentCreateEx(0, "D", &gameContent, OPEN_EXISTING, nullptr, nullptr, 0, 0, nullptr);
+
+    XAudioInitializeSystem();
+}
+
+// Loads the executable into guest memory and returns its entry point.
+static uint32_t LdrLoadModule(const std::filesystem::path& path)
+{
+    auto file = LoadFile(path);
+    if (file.empty())
+        return 0;
+
+    // XenonUtils handles the XEX encryption and compression.
+    auto image = Image::ParseImage(file.data(), file.size());
+
+    // The loader's buffer holds the stored blocks, which can be shorter than the image size
+    // the header declares; guest memory starts zeroed, so copy only what the buffer holds.
+    size_t loaded = std::min<size_t>(image.size, malloc_usable_size(image.data.get()));
+    memcpy(g_memory.Translate(image.base), image.data.get(), loaded);
+
+    // Function imports become thunks that call the runtime; remember them by export name so
+    // XexGetProcedureAddress can hand them out.
+    for (const auto& symbol : image.symbols)
     {
-        fprintf(stderr, "[nb] stub %-40s r3=%08X r4=%08X r5=%08X r6=%08X lr=%08X\n", name,
-            ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, uint32_t(ctx.lr));
+        if (symbol.type == Symbol_Function && symbol.name.starts_with("__imp__"))
+            RegisterImportThunk(std::string_view(symbol.name).substr(7), uint32_t(symbol.address));
     }
+
+    // Resources (XEX_HEADER_RESOURCE_INFO): a size, then 16-byte entries of name, address, size.
+    if (const auto* info = (const uint8_t*)getOptHeaderPtr(file.data(), XEX_HEADER_RESOURCE_INFO))
+    {
+        uint32_t headerSize = *(const be<uint32_t>*)info;
+        for (uint32_t offset = 4; offset + 16 <= headerSize; offset += 16)
+        {
+            const uint8_t* entry = info + offset;
+            std::string name((const char*)entry, strnlen((const char*)entry, 8));
+            RegisterResource(name, *(const be<uint32_t>*)(entry + 8), *(const be<uint32_t>*)(entry + 12));
+            LOGFN("Resource {}: 0x{:08X}, 0x{:X} bytes", name, uint32_t(*(const be<uint32_t>*)(entry + 8)), uint32_t(*(const be<uint32_t>*)(entry + 12)));
+        }
+    }
+
+    LOGFN("Loaded {}: image 0x{:08X}, size 0x{:X}, entry 0x{:08X}", path.string(), image.base, image.size, image.entry_point);
+    return uint32_t(image.entry_point);
 }
 
 int main(int argc, char** argv)
 {
-    const char* xexPath = argc > 1 ? argv[1] : "game/Naughty_Bear/Default.xex";
-    auto file = LoadFile(xexPath);
-    if (file.empty())
-    {
-        fprintf(stderr, "[nb] could not read %s\n", xexPath);
-        return EXIT_FAILURE;
-    }
-    auto image = Image::ParseImage(file.data(), file.size());
-    fprintf(stderr, "[nb] loaded %s: image 0x%08zX size 0x%X entry 0x%08zX\n", xexPath, image.base, image.size, image.entry_point);
+    os::logger::Init();
+    setvbuf(stdout, nullptr, _IONBF, 0); // keep log lines when the process dies
 
-    // Reserve the whole guest address space up front; pages are committed on first touch.
-    gBase = static_cast<uint8_t*>(mmap(nullptr, kGuestMemorySize, PROT_READ | PROT_WRITE,
-        MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0));
-    if (gBase == MAP_FAILED)
+    std::filesystem::path xexPath = argc > 1 ? argv[1] : "game/Naughty_Bear/Default.xex";
+    if (std::filesystem::is_directory(xexPath))
+        xexPath /= "Default.xex";
+    g_gamePath = std::filesystem::absolute(xexPath).parent_path();
+
+    if (g_memory.base == nullptr)
     {
-        perror("[nb] mmap");
+        LOGN_ERROR("Could not reserve the 4 GB guest address space.");
         return EXIT_FAILURE;
     }
 
-    struct sigaction sa{};
-    sa.sa_sigaction = OnCrash;
-    sa.sa_flags = SA_SIGINFO;
-    sigaction(SIGSEGV, &sa, nullptr);
-    sigaction(SIGBUS, &sa, nullptr);
-    sigaction(SIGILL, &sa, nullptr);
-    sigaction(SIGTRAP, &sa, nullptr);
-    sigaction(SIGFPE, &sa, nullptr);
+    InstallCrashHandler();
+    KiSystemStartup();
 
-    // The loader's buffer holds the stored blocks, which can be shorter than the image size
-    // the header declares; guest memory is already zeroed, so copy only what the buffer holds.
-    size_t loaded = std::min<size_t>(image.size, malloc_usable_size(image.data.get()));
-    memcpy(gBase + image.base, image.data.get(), loaded);
-    fprintf(stderr, "[nb] copied 0x%zX of 0x%X image bytes\n", loaded, image.size);
+    uint32_t entry = LdrLoadModule(xexPath);
+    if (entry == 0)
+    {
+        LOGFN_ERROR("Could not load {}", xexPath.string());
+        return EXIT_FAILURE;
+    }
 
-    // Indirect calls look up host functions in a table placed right after the image.
-    size_t mapped = 0;
-    for (auto* m = PPCFuncMappings; m->host != nullptr; m++, mapped++)
-        PPC_LOOKUP_FUNC(gBase, m->guest) = m->host;
-    fprintf(stderr, "[nb] %zu functions mapped\n", mapped);
-
-    // r13 points at the processor control block; offset 0x100 holds the current thread.
-    uint8_t* base = gBase; // name used by the PPC_* memory macros
-    PPC_STORE_U32(kPcrAddress + 0x100, kThreadAddress);
-
-    PPCContext ctx{};
-    ctx.r1.u64 = kStackBase + kStackSize - 0x100;
-    ctx.r13.u64 = kPcrAddress;
-    ctx.fpscr.loadFromHost();
-
-    auto* entry = PPC_LOOKUP_FUNC(gBase, image.entry_point);
-    fprintf(stderr, "[nb] calling entry point 0x%08zX\n", image.entry_point);
-    entry(ctx, gBase);
-    fprintf(stderr, "[nb] entry point returned r3=0x%08X\n", ctx.r3.u32);
+    GuestThread::Start({ entry, 0, 0 });
+    LOGN("Entry point returned.");
     return EXIT_SUCCESS;
 }

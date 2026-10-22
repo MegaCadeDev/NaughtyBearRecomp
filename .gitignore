@@ -12,3 +12,6 @@ generated/
 # Build output
 build/
 out/
+
+# Runtime saves
+save/

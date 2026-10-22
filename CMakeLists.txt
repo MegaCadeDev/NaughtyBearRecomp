@@ -27,14 +27,24 @@ target_compile_options(NaughtyBearRecompLib PRIVATE
     -fno-strict-aliasing
     -Wno-unused-label -Wno-unused-variable -Wno-unused-but-set-variable)
 
-# Logging stubs for every import without a real implementation.
+# Logging stubs for every import the runtime does not implement yet.
+file(GLOB_RECURSE RUNTIME_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/*.cpp)
+
 set(IMPORT_STUBS ${CMAKE_BINARY_DIR}/import_stubs.cpp)
 add_custom_command(
     OUTPUT ${IMPORT_STUBS}
     COMMAND ${CMAKE_SOURCE_DIR}/tools/gen_import_stubs.py ${GENERATED_DIR}/ppc_func_mapping.cpp ${IMPORT_STUBS}
-    DEPENDS ${CMAKE_SOURCE_DIR}/tools/gen_import_stubs.py ${GENERATED_DIR}/ppc_func_mapping.cpp ${CMAKE_SOURCE_DIR}/src/kernel/implemented.txt
+    DEPENDS ${CMAKE_SOURCE_DIR}/tools/gen_import_stubs.py ${GENERATED_DIR}/ppc_func_mapping.cpp ${RUNTIME_SOURCES}
     COMMENT "Generating import stubs")
 
-add_executable(NaughtyBear src/main.cpp ${IMPORT_STUBS})
-target_include_directories(NaughtyBear PRIVATE src)
-target_link_libraries(NaughtyBear PRIVATE NaughtyBearRecompLib XenonUtils)
+add_library(o1heap STATIC thirdparty/o1heap/o1heap.c)
+target_include_directories(o1heap PUBLIC thirdparty/o1heap)
+
+# The runtime: ported from Unleashed Recompiled (GPL-3.0), see NOTICE.md.
+add_executable(NaughtyBear ${RUNTIME_SOURCES} ${IMPORT_STUBS})
+target_include_directories(NaughtyBear PRIVATE
+    src
+    thirdparty/unordered_dense/include
+    tools/XenonRecomp/thirdparty/xxHash)
+target_precompile_headers(NaughtyBear PRIVATE src/stdafx.h)
+target_link_libraries(NaughtyBear PRIVATE NaughtyBearRecompLib XenonUtils o1heap fmt::fmt xxHash::xxhash)
