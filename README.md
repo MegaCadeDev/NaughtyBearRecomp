@@ -41,8 +41,11 @@ Debug options: `NB_SCREENSHOT=file.ppm[:frame]` (convert with `tools/ppm2png.py`
 
 ## Controls
 
-Any SDL-supported controller works (Xbox, PlayStation, Switch Pro and others); the most
-recently used one is player 1. The keyboard also controls player 1:
+Any SDL-supported controller works (Xbox 360 wired and wireless, Xbox One/Series,
+PlayStation, Switch Pro and others), whether it's connected before or after starting; the
+most recently used one is player 1. Mappings for controllers SDL doesn't know can be added
+in a `gamecontrollerdb.txt` (SDL's format) next to the `game` folder. The keyboard also
+controls player 1:
 
 | Xbox 360 | Keyboard |
 |-|-|

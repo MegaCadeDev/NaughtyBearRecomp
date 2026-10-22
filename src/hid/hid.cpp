@@ -10,6 +10,7 @@
 #include <hid/hid.h>
 #include <kernel/xdm.h>
 #include <os/logger.h>
+#include <user/paths.h>
 #include <SDL.h>
 
 namespace
@@ -164,29 +165,75 @@ namespace
             pad.bRightTrigger = 255;
     }
 
+    // Opens the controller at an SDL device index, unless it's open already.
+    void OpenController(int deviceIndex)
+    {
+        if (!SDL_IsGameController(deviceIndex))
+        {
+            LOGFN_WARNING("Input: {} has no controller mapping (add one to gamecontrollerdb.txt)", SDL_JoystickNameForIndex(deviceIndex));
+            return;
+        }
+        SDL_JoystickID id = SDL_JoystickGetDeviceInstanceID(deviceIndex);
+        if (FindController(id) != nullptr)
+            return;
+
+        for (auto& slot : g_controllers)
+        {
+            if (slot.controller != nullptr)
+                continue;
+            slot.controller = SDL_GameControllerOpen(deviceIndex);
+            if (slot.controller != nullptr)
+            {
+                slot.id = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(slot.controller));
+                slot.state = {};
+                PollButtons(slot);
+                PollAxes(slot);
+                g_activeController = &slot;
+                LOGFN("Input: controller connected: {}", SDL_GameControllerName(slot.controller));
+            }
+            break;
+        }
+    }
+
+    // Mappings for controllers SDL's built-in database might lack, as SDL reports them on
+    // Linux (xpad driver): the wired Xbox 360 controller (045e:028e), both firmware versions.
+    // More can be added in a gamecontrollerdb.txt next to the executable or the game folder.
+    constexpr const char* EXTRA_MAPPINGS[] =
+    {
+        "030000005e0400008e02000014010000,Xbox 360 Controller,a:b0,b:b1,back:b6,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b8,leftshoulder:b4,leftstick:b9,lefttrigger:a2,leftx:a0,lefty:a1,rightshoulder:b5,rightstick:b10,righttrigger:a5,rightx:a3,righty:a4,start:b7,x:b2,y:b3,platform:Linux,",
+        "030000005e0400008e02000010010000,Xbox 360 Controller,a:b0,b:b1,back:b6,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b8,leftshoulder:b4,leftstick:b9,lefttrigger:a2,leftx:a0,lefty:a1,rightshoulder:b5,rightstick:b10,righttrigger:a5,rightx:a3,righty:a4,start:b7,x:b2,y:b3,platform:Linux,",
+    };
+
+    void LoadMappings()
+    {
+        for (const char* mapping : EXTRA_MAPPINGS)
+            SDL_GameControllerAddMapping(mapping);
+
+        std::vector<std::filesystem::path> files = { GetSavePath(false).parent_path() / "gamecontrollerdb.txt",
+            std::filesystem::current_path() / "gamecontrollerdb.txt" };
+        std::error_code ec;
+        auto executable = std::filesystem::read_symlink("/proc/self/exe", ec);
+        if (!ec)
+            files.push_back(executable.parent_path() / "gamecontrollerdb.txt");
+        for (const auto& file : files)
+        {
+            if (!std::filesystem::exists(file, ec))
+                continue;
+            int added = SDL_GameControllerAddMappingsFromFile(file.string().c_str());
+            if (added >= 0)
+                LOGFN("Input: {} controller mappings from {}", added, file.string());
+            break;
+        }
+    }
+
     int OnSDLEvent(void*, SDL_Event* event)
     {
         std::lock_guard lock(g_inputMutex);
         switch (event->type)
         {
         case SDL_CONTROLLERDEVICEADDED:
-        {
-            for (auto& slot : g_controllers)
-            {
-                if (slot.controller != nullptr)
-                    continue;
-                slot.controller = SDL_GameControllerOpen(event->cdevice.which);
-                if (slot.controller != nullptr)
-                {
-                    slot.id = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(slot.controller));
-                    slot.state = {};
-                    g_activeController = &slot;
-                    LOGFN("Input: controller connected: {}", SDL_GameControllerName(slot.controller));
-                }
-                break;
-            }
+            OpenController(event->cdevice.which);
             break;
-        }
         case SDL_CONTROLLERDEVICEREMOVED:
             if (Controller* c = FindController(event->cdevice.which))
             {
@@ -251,6 +298,15 @@ void hid::Init()
     SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, "0");
     SDL_AddEventWatch(OnSDLEvent, nullptr);
     SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER);
+    LoadMappings();
+
+    // Controllers connected before this point announced themselves before the event
+    // watch was installed, so open them here; later ones arrive as events.
+    {
+        std::lock_guard lock(g_inputMutex);
+        for (int i = 0; i < SDL_NumJoysticks(); i++)
+            OpenController(i);
+    }
     LoadInputScript();
 }
 
