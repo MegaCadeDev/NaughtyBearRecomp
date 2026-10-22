@@ -73,6 +73,8 @@ static void GuestThreadFunc(GuestThreadHandle* hThread)
 #endif
     hThread->suspended.wait(true);
     GuestThread::Start(hThread->params);
+    hThread->finished = true;
+    hThread->finished.notify_all();
 #ifdef USE_PTHREAD
     return nullptr;
 #endif
@@ -127,7 +129,17 @@ uint32_t GuestThreadHandle::GetThreadId() const
 
 uint32_t GuestThreadHandle::Wait(uint32_t timeout)
 {
-    assert(timeout == INFINITE);
+    // Polls and timed waits check the finished flag; only an infinite wait joins.
+    if (timeout != INFINITE)
+    {
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout);
+        while (!finished)
+        {
+            if (std::chrono::steady_clock::now() >= deadline)
+                return STATUS_TIMEOUT;
+            std::this_thread::sleep_for(std::chrono::microseconds(500));
+        }
+    }
 
 #ifdef USE_PTHREAD
     pthread_join(thread, nullptr);
@@ -148,7 +160,14 @@ uint32_t GuestThread::Start(const GuestThreadParams& params)
     ctx.ppcContext.r3.u64 = params.value;
     ctx.ppcContext.r4.u64 = params.value2;
 
-    g_memory.FindFunction(params.function)(ctx.ppcContext, g_memory.base);
+    try
+    {
+        g_memory.FindFunction(params.function)(ctx.ppcContext, g_memory.base);
+    }
+    catch (const GuestThreadExit& exit)
+    {
+        return exit.exitCode;
+    }
 
     return ctx.ppcContext.r3.u32;
 }

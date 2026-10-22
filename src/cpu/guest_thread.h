@@ -34,6 +34,7 @@ struct GuestThreadHandle : KernelObject
 {
     GuestThreadParams params;
     std::atomic<bool> suspended;
+    std::atomic<bool> finished = false;
 #ifdef USE_PTHREAD
     pthread_t thread;
 #else
@@ -46,6 +47,12 @@ struct GuestThreadHandle : KernelObject
     uint32_t GetThreadId() const;
 
     uint32_t Wait(uint32_t timeout) override;
+};
+
+// Thrown by ExTerminateThread to unwind the guest thread back to GuestThread::Start.
+struct GuestThreadExit
+{
+    uint32_t exitCode;
 };
 
 struct GuestThread

@@ -283,6 +283,111 @@ uint32_t KeInitializeDpc(uint8_t* dpc, uint32_t routine, uint32_t context)
     return 0;
 }
 
+// Waitable timers. Due times are LARGE_INTEGERs: negative = relative (100 ns units),
+// positive = absolute FILETIME. The due time is checked when something waits on the timer.
+struct Timer final : KernelObject
+{
+    using Clock = std::chrono::steady_clock;
+
+    std::mutex mutex;
+    bool manualReset;
+    bool signaled = false;
+    bool armed = false;
+    Clock::time_point due;
+    std::chrono::milliseconds period{ 0 };
+
+    explicit Timer(bool manualReset) : manualReset(manualReset) {}
+
+    // Fires the timer if it is due; returns whether it is signaled. Called with the lock held.
+    bool Poll()
+    {
+        if (armed && Clock::now() >= due)
+        {
+            signaled = true;
+            if (period.count() > 0)
+                due += period;
+            else
+                armed = false;
+        }
+        return signaled;
+    }
+
+    uint32_t Wait(uint32_t timeout) override
+    {
+        auto deadline = timeout == INFINITE ? Clock::time_point::max() : Clock::now() + std::chrono::milliseconds(timeout);
+        while (true)
+        {
+            {
+                std::lock_guard lock(mutex);
+                if (Poll())
+                {
+                    if (!manualReset)
+                        signaled = false;
+                    return STATUS_WAIT_0;
+                }
+            }
+            if (Clock::now() >= deadline)
+                return STATUS_TIMEOUT;
+            std::this_thread::sleep_for(std::chrono::microseconds(500));
+        }
+    }
+};
+
+static Timer* GetTimer(uint32_t handle)
+{
+    if (handle == 0 || handle >= 0xFFFFFF00 || !IsKernelObject(handle))
+        return nullptr;
+    return dynamic_cast<Timer*>(GetKernelObject(handle));
+}
+
+// NtCreateTimer(handle, attributes, type): type 0 = notification (manual reset), 1 = synchronization.
+uint32_t NtCreateTimer(be<uint32_t>* handle, void* attributes, uint32_t type)
+{
+    *handle = GetKernelHandle(CreateKernelObject<Timer>(type == 0));
+    return X_STATUS_SUCCESS;
+}
+
+uint32_t NtSetTimerEx(uint32_t handle, be<int64_t>* dueTime, uint32_t routine, uint32_t mode, uint32_t routineArgument,
+    uint32_t resume, int32_t periodMs, uint32_t unknown)
+{
+    auto* timer = GetTimer(handle);
+    if (timer == nullptr)
+        return X_STATUS_INVALID_HANDLE;
+    if (routine != 0)
+        LOG_UTILITY("Timer APC routines are not supported");
+
+    std::lock_guard lock(timer->mutex);
+    int64_t due = dueTime != nullptr ? int64_t(*dueTime) : 0;
+    auto now = Timer::Clock::now();
+    if (due < 0)
+    {
+        timer->due = now + std::chrono::microseconds(-due / 10);
+    }
+    else
+    {
+        // Absolute FILETIME: convert through the system clock.
+        constexpr int64_t EPOCH_DIFFERENCE = 116444736000000000LL;
+        auto target = std::chrono::system_clock::time_point(std::chrono::microseconds((due - EPOCH_DIFFERENCE) / 10));
+        timer->due = now + std::chrono::duration_cast<Timer::Clock::duration>(target - std::chrono::system_clock::now());
+    }
+    timer->period = std::chrono::milliseconds(std::max(periodMs, 0));
+    timer->signaled = false;
+    timer->armed = true;
+    return X_STATUS_SUCCESS;
+}
+
+uint32_t NtCancelTimer(uint32_t handle, be<uint32_t>* currentState)
+{
+    auto* timer = GetTimer(handle);
+    if (timer == nullptr)
+        return X_STATUS_INVALID_HANDLE;
+    std::lock_guard lock(timer->mutex);
+    if (currentState != nullptr)
+        *currentState = timer->signaled;
+    timer->armed = false;
+    return X_STATUS_SUCCESS;
+}
+
 uint32_t MmMapIoSpace(uint32_t physical, uint32_t size, uint32_t flags) { return physical; }
 uint32_t MmSetAddressProtect(uint32_t address, uint32_t size, uint32_t protect) { return 0; }
 
@@ -326,5 +431,8 @@ GUEST_FUNCTION_HOOK(__imp__NtReleaseMutant, NtReleaseMutant);
 GUEST_FUNCTION_HOOK(__imp__NtYieldExecution, NtYieldExecution);
 GUEST_FUNCTION_HOOK(__imp__InterlockedPopEntrySList, InterlockedPopEntrySList);
 GUEST_FUNCTION_HOOK(__imp__KeInitializeDpc, KeInitializeDpc);
+GUEST_FUNCTION_HOOK(__imp__NtCreateTimer, NtCreateTimer);
+GUEST_FUNCTION_HOOK(__imp__NtSetTimerEx, NtSetTimerEx);
+GUEST_FUNCTION_HOOK(__imp__NtCancelTimer, NtCancelTimer);
 GUEST_FUNCTION_HOOK(__imp__MmMapIoSpace, MmMapIoSpace);
 GUEST_FUNCTION_HOOK(__imp__MmSetAddressProtect, MmSetAddressProtect);

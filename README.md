@@ -14,7 +14,8 @@ place it in `game/` (the executable at `game/Naughty_Bear/Default.xex`).
 The whole executable recompiles and builds. The game boots, renders its title screen
 and menus in a Vulkan window, and takes controller and keyboard input: draws are replayed with the game's shaders (translated by XenosRecomp)
 and textures. Render states, depth, render-to-texture and the buffer-based draws used in
-gameplay are still to do (`docs/d3d_map.md`), as are audio output and saving.
+gameplay are still to do (`docs/d3d_map.md`), as is audio output. Saves are kept in
+`save/` (one folder per save container) and persist between runs.
 
 To capture the shaders the renderer needs, run once with `NB_DUMP_SHADERS=shaders/dump`,
 then `tools/translate_shaders.sh`, and rebuild.

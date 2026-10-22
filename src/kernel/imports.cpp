@@ -17,6 +17,8 @@
 #include <ntstatus.h>
 #endif
 
+// Saves, storage devices and profile settings are implemented in kernel/xam_content.cpp.
+
 // Stubs return 0 rather than nothing: a void stub leaves the caller's first argument in r3,
 // which the game then reads back as the result (Unleashed Recompiled's stubs are void).
 
@@ -71,7 +73,18 @@ struct Event final : KernelObject, HostObject<XKEVENT>
         }
         else
         {
-            assert(false && "Unhandled timeout value.");
+            // Finite timeout: poll until signaled or the deadline passes (Unleashed only
+            // handles 0 and INFINITE).
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout);
+            while (true)
+            {
+                bool expected = true;
+                if (manualReset ? signaled.load() : signaled.compare_exchange_weak(expected, false))
+                    break;
+                if (std::chrono::steady_clock::now() >= deadline)
+                    return STATUS_TIMEOUT;
+                std::this_thread::sleep_for(std::chrono::microseconds(500));
+            }
         }
 
         return STATUS_SUCCESS;
@@ -154,8 +167,16 @@ struct Semaphore final : KernelObject, HostObject<XKSEMAPHORE>
         }
         else
         {
-            assert(false && "Unhandled timeout value.");
-            return STATUS_TIMEOUT;
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout);
+            while (true)
+            {
+                uint32_t currentCount = count.load();
+                if (currentCount != 0 && count.compare_exchange_weak(currentCount, currentCount - 1))
+                    return STATUS_SUCCESS;
+                if (std::chrono::steady_clock::now() >= deadline)
+                    return STATUS_TIMEOUT;
+                std::this_thread::sleep_for(std::chrono::microseconds(500));
+            }
         }
     }
 
@@ -406,7 +427,6 @@ uint32_t FscSetCacheElementCount()
 uint32_t NtWaitForSingleObjectEx(uint32_t Handle, uint32_t WaitMode, uint32_t Alertable, be<int64_t>* Timeout)
 {
     uint32_t timeout = GuestTimeoutToMilliseconds(Timeout);
-    assert(timeout == 0 || timeout == INFINITE);
 
     if (IsKernelObject(Handle))
     {
@@ -1016,25 +1036,20 @@ bool KeResetEvent(XKEVENT* pEvent)
 uint32_t KeWaitForSingleObject(XDISPATCHER_HEADER* Object, uint32_t WaitReason, uint32_t WaitMode, bool Alertable, be<int64_t>* Timeout)
 {
     const uint32_t timeout = GuestTimeoutToMilliseconds(Timeout);
-    assert(timeout == INFINITE);
 
     switch (Object->Type)
     {
         case 0:
         case 1:
-            QueryKernelObject<Event>(*Object)->Wait(timeout);
-            break;
+            return QueryKernelObject<Event>(*Object)->Wait(timeout);
 
         case 5:
-            QueryKernelObject<Semaphore>(*Object)->Wait(timeout);
-            break;
+            return QueryKernelObject<Semaphore>(*Object)->Wait(timeout);
 
         default:
             assert(false && "Unrecognized kernel object type.");
             return STATUS_TIMEOUT;
     }
-
-    return STATUS_SUCCESS;
 }
 
 static std::vector<size_t> g_tlsFreeIndices;
@@ -1259,10 +1274,28 @@ uint32_t NtReleaseSemaphore(Semaphore* Handle, uint32_t ReleaseCount, int32_t* P
     return STATUS_SUCCESS;
 }
 
-uint32_t NtWaitForMultipleObjectsEx()
+// Waits on kernel handles: WaitType 0 = all, 1 = any.
+uint32_t NtWaitForMultipleObjectsEx(uint32_t Count, be<uint32_t>* Handles, uint32_t WaitType, uint32_t WaitMode, uint32_t Alertable, be<int64_t>* Timeout)
 {
-    LOG_UTILITY("!!! STUB !!!");
-    return 0;
+    const uint32_t timeout = GuestTimeoutToMilliseconds(Timeout);
+    if (WaitType == 0)
+    {
+        for (uint32_t i = 0; i < Count; i++)
+            if (GetKernelObject(Handles[i])->Wait(timeout) == STATUS_TIMEOUT)
+                return STATUS_TIMEOUT;
+        return STATUS_SUCCESS;
+    }
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout == INFINITE ? 0 : timeout);
+    while (true)
+    {
+        for (uint32_t i = 0; i < Count; i++)
+            if (GetKernelObject(Handles[i])->Wait(0) == STATUS_SUCCESS)
+                return STATUS_WAIT_0 + i;
+        if (timeout != INFINITE && std::chrono::steady_clock::now() >= deadline)
+            return STATUS_TIMEOUT;
+        std::this_thread::sleep_for(std::chrono::microseconds(500));
+    }
 }
 
 uint32_t RtlCompareStringN()
@@ -1320,10 +1353,10 @@ uint32_t RtlInitUnicodeString()
     return 0;
 }
 
-uint32_t ExTerminateThread()
+// Ends the calling guest thread (unwinds to GuestThread::Start).
+uint32_t ExTerminateThread(uint32_t exitCode)
 {
-    LOG_UTILITY("!!! STUB !!!");
-    return 0;
+    throw GuestThreadExit{ exitCode };
 }
 
 uint32_t ExCreateThread(be<uint32_t>* handle, uint32_t stackSize, be<uint32_t>* threadId, uint32_t xApiThreadStartup, uint32_t startAddress, uint32_t startContext, uint32_t creationFlags)
@@ -1427,13 +1460,26 @@ uint32_t KeWaitForMultipleObjects(uint32_t Count, xpointer<XDISPATCHER_HEADER>* 
 {
     // FIXME: This function is only accounting for events.
 
-    const uint64_t timeout = GuestTimeoutToMilliseconds(Timeout);
-    assert(timeout == INFINITE);
+    const uint32_t timeout = GuestTimeoutToMilliseconds(Timeout);
 
     if (WaitType == 0) // Wait all
     {
         for (size_t i = 0; i < Count; i++)
-            QueryKernelObject<Event>(*Objects[i])->Wait(timeout);
+            if (QueryKernelObject<Event>(*Objects[i])->Wait(timeout) == STATUS_TIMEOUT)
+                return STATUS_TIMEOUT;
+    }
+    else if (timeout != INFINITE)
+    {
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout);
+        while (true)
+        {
+            for (size_t i = 0; i < Count; i++)
+                if (QueryKernelObject<Event>(*Objects[i])->Wait(0) == STATUS_SUCCESS)
+                    return STATUS_WAIT_0 + i;
+            if (std::chrono::steady_clock::now() >= deadline)
+                return STATUS_TIMEOUT;
+            std::this_thread::sleep_for(std::chrono::microseconds(500));
+        }
     }
     else
     {
@@ -1553,18 +1599,9 @@ GUEST_FUNCTION_HOOK(__imp__XGetGameRegion, XGetGameRegion);
 GUEST_FUNCTION_HOOK(__imp__XMsgStartIORequest, XMsgStartIORequest);
 GUEST_FUNCTION_HOOK(__imp__XamUserGetSigninState, XamUserGetSigninState);
 GUEST_FUNCTION_HOOK(__imp__XamGetSystemVersion, XamGetSystemVersion);
-GUEST_FUNCTION_HOOK(__imp__XamContentCreateEx, XamContentCreateEx);
-GUEST_FUNCTION_HOOK(__imp__XamContentDelete, XamContentDelete);
-GUEST_FUNCTION_HOOK(__imp__XamContentClose, XamContentClose);
-GUEST_FUNCTION_HOOK(__imp__XamContentGetCreator, XamContentGetCreator);
-GUEST_FUNCTION_HOOK(__imp__XamContentCreateEnumerator, XamContentCreateEnumerator);
-GUEST_FUNCTION_HOOK(__imp__XamContentGetDeviceState, XamContentGetDeviceState);
-GUEST_FUNCTION_HOOK(__imp__XamContentGetDeviceData, XamContentGetDeviceData);
-GUEST_FUNCTION_HOOK(__imp__XamEnumerate, XamEnumerate);
 GUEST_FUNCTION_HOOK(__imp__XamNotifyCreateListener, XamNotifyCreateListener);
 GUEST_FUNCTION_HOOK(__imp__XamUserGetSigninInfo, XamUserGetSigninInfo);
 GUEST_FUNCTION_HOOK(__imp__XamShowSigninUI, XamShowSigninUI);
-GUEST_FUNCTION_HOOK(__imp__XamShowDeviceSelectorUI, XamShowDeviceSelectorUI);
 GUEST_FUNCTION_HOOK(__imp__XamShowMessageBoxUI, XamShowMessageBoxUI);
 GUEST_FUNCTION_HOOK(__imp__XamShowDirtyDiscErrorUI, XamShowDirtyDiscErrorUI);
 GUEST_FUNCTION_HOOK(__imp__XamEnableInactivityProcessing, XamEnableInactivityProcessing);
@@ -1649,7 +1686,6 @@ GUEST_FUNCTION_HOOK(__imp__KeTlsSetValue, KeTlsSetValue);
 GUEST_FUNCTION_HOOK(__imp__KeTlsAlloc, KeTlsAlloc);
 GUEST_FUNCTION_HOOK(__imp__KeTlsFree, KeTlsFree);
 GUEST_FUNCTION_HOOK(__imp__XMsgInProcessCall, XMsgInProcessCall);
-GUEST_FUNCTION_HOOK(__imp__XamUserReadProfileSettings, XamUserReadProfileSettings);
 GUEST_FUNCTION_HOOK(__imp__XMsgStartIORequestEx, XMsgStartIORequestEx);
 GUEST_FUNCTION_HOOK(__imp__XamInputGetCapabilities, XamInputGetCapabilities);
 GUEST_FUNCTION_HOOK(__imp__XamInputGetState, XamInputGetState);

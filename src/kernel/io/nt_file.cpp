@@ -18,6 +18,8 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <condition_variable>
+#include <deque>
 
 void SignalEventHandle(uint32_t handle);
 
@@ -60,9 +62,51 @@ namespace
 
     constexpr uint32_t ACCESS_WRITE_MASK = 0x40000000 /* GENERIC_WRITE */ | 0x10000000 /* GENERIC_ALL */ | 0x0002 /* FILE_WRITE_DATA */ | 0x0004 /* FILE_APPEND_DATA */;
 
+    // I/O completion ports: a queue of completed requests that threads wait on.
+    struct IoCompletion final : KernelObject
+    {
+        struct Packet
+        {
+            uint32_t key;
+            uint32_t apcContext;
+            uint32_t status;
+            uint32_t information;
+        };
+
+        std::mutex mutex;
+        std::condition_variable available;
+        std::deque<Packet> packets;
+
+        void Post(const Packet& packet)
+        {
+            {
+                std::lock_guard lock(mutex);
+                packets.push_back(packet);
+            }
+            available.notify_one();
+        }
+
+        // timeoutMs: INFINITE or milliseconds.
+        bool Remove(Packet& packet, uint32_t timeoutMs)
+        {
+            std::unique_lock lock(mutex);
+            auto ready = [&] { return !packets.empty(); };
+            if (timeoutMs == INFINITE)
+                available.wait(lock, ready);
+            else if (!available.wait_for(lock, std::chrono::milliseconds(timeoutMs), ready))
+                return false;
+            packet = packets.front();
+            packets.pop_front();
+            return true;
+        }
+    };
+
     struct FileHandle final : KernelObject
     {
         int fd = -1;
+        // Set with NtSetInformationFile(FileCompletionInformation): finished requests are posted here.
+        IoCompletion* completionPort = nullptr;
+        uint32_t completionKey = 0;
         bool isDirectory = false;
         std::filesystem::path path;
         uint64_t position = 0;
@@ -226,6 +270,14 @@ namespace
         SignalEventHandle(event);
     }
 
+    // Completes an asynchronous-style request: status block, event, and the file's completion port.
+    void CompleteRequest(FileHandle* handle, XIO_STATUS_BLOCK* ioStatusBlock, uint32_t status, uint32_t information, uint32_t event, uint32_t apcContext)
+    {
+        Complete(ioStatusBlock, status, information, event);
+        if (handle->completionPort != nullptr && apcContext != 0)
+            handle->completionPort->Post({ handle->completionKey, apcContext, status, information });
+    }
+
     // Windows FILETIME (100 ns since 1601) from a host file time.
     uint64_t ToFileTime(const struct timespec& ts)
     {
@@ -315,7 +367,11 @@ uint32_t NtCreateFile(be<uint32_t>* fileHandle, uint32_t desiredAccess, XOBJECT_
 
     auto fail = [&](uint32_t status)
         {
-            LOGF_IMPL(Warning, "NtCreateFile", "\"{}\" -> {}: 0x{:08X}", guestPath, path.string(), status);
+            static std::mutex reportedMutex;
+            static std::set<std::string> reported;
+            std::lock_guard lock(reportedMutex);
+            if (reported.insert(std::string(guestPath)).second)
+                LOGF_IMPL(Warning, "NtCreateFile", "\"{}\" -> {}: 0x{:08X}", guestPath, path.string(), status);
             *fileHandle = GUEST_INVALID_HANDLE_VALUE;
             Complete(ioStatusBlock, status, 0);
             return status;
@@ -433,7 +489,7 @@ uint32_t NtReadFile(uint32_t fileHandle, uint32_t event, uint32_t apcRoutine, ui
     handle->position = offset + read;
 
     uint32_t status = (read == 0 && length != 0) ? X_STATUS_END_OF_FILE : X_STATUS_SUCCESS;
-    Complete(ioStatusBlock, status, uint32_t(read), event);
+    CompleteRequest(handle, ioStatusBlock, status, uint32_t(read), event, apcContext);
     if (apcRoutine != 0)
         LOG_UTILITY("APC completion routines are not supported");
     return status;
@@ -462,7 +518,7 @@ uint32_t NtReadFileScatter(uint32_t fileHandle, uint32_t event, uint32_t apcRout
     handle->position = offset + total;
 
     uint32_t status = (total == 0 && length != 0) ? X_STATUS_END_OF_FILE : X_STATUS_SUCCESS;
-    Complete(ioStatusBlock, status, total, event);
+    CompleteRequest(handle, ioStatusBlock, status, total, event, apcContext);
     return status;
 }
 
@@ -481,7 +537,7 @@ uint32_t NtWriteFile(uint32_t fileHandle, uint32_t event, uint32_t apcRoutine, u
         return X_STATUS_ACCESS_DENIED;
     }
     handle->position = offset + written;
-    Complete(ioStatusBlock, X_STATUS_SUCCESS, uint32_t(written), event);
+    CompleteRequest(handle, ioStatusBlock, X_STATUS_SUCCESS, uint32_t(written), event, apcContext);
     return X_STATUS_SUCCESS;
 }
 
@@ -597,6 +653,13 @@ uint32_t NtSetInformationFile(uint32_t fileHandle, XIO_STATUS_BLOCK* ioStatusBlo
         break;
     case 4: // FileBasicInformation (times/attributes); nothing to keep
         break;
+    case 30: // FileCompletionInformation { Port, Key }
+    {
+        uint32_t port = *(be<uint32_t>*)fileInformation;
+        handle->completionPort = port != 0 && IsKernelObject(port) ? dynamic_cast<IoCompletion*>(GetKernelObject(port)) : nullptr;
+        handle->completionKey = *((be<uint32_t>*)fileInformation + 1);
+        break;
+    }
     default:
         LOGF_WARNING("Unhandled information class {}", fileInformationClass);
         Complete(ioStatusBlock, X_STATUS_NOT_IMPLEMENTED, 0);
@@ -750,6 +813,57 @@ uint32_t NtFlushBuffersFile(uint32_t fileHandle, XIO_STATUS_BLOCK* ioStatusBlock
     return X_STATUS_SUCCESS;
 }
 
+uint32_t NtCreateIoCompletion(be<uint32_t>* handle, uint32_t desiredAccess, void* attributes, uint32_t concurrentThreads)
+{
+    if (handle == nullptr)
+        return X_STATUS_INVALID_PARAMETER;
+    *handle = GetKernelHandle(CreateKernelObject<IoCompletion>());
+    return X_STATUS_SUCCESS;
+}
+
+static IoCompletion* GetIoCompletion(uint32_t handle)
+{
+    if (handle == 0 || handle >= 0xFFFFFF00 || !IsKernelObject(handle))
+        return nullptr;
+    return dynamic_cast<IoCompletion*>(GetKernelObject(handle));
+}
+
+uint32_t NtSetIoCompletion(uint32_t handle, uint32_t keyContext, uint32_t apcContext, uint32_t status, uint32_t information)
+{
+    auto* port = GetIoCompletion(handle);
+    if (port == nullptr)
+        return X_STATUS_INVALID_HANDLE;
+    port->Post({ keyContext, apcContext, status, information });
+    return X_STATUS_SUCCESS;
+}
+
+uint32_t GuestTimeoutToMilliseconds(be<int64_t>* timeout);
+
+uint32_t NtRemoveIoCompletion(uint32_t handle, be<uint32_t>* keyContext, be<uint32_t>* apcContext, XIO_STATUS_BLOCK* ioStatusBlock, be<int64_t>* timeout)
+{
+    auto* port = GetIoCompletion(handle);
+    if (port == nullptr)
+        return X_STATUS_INVALID_HANDLE;
+
+    IoCompletion::Packet packet;
+    if (!port->Remove(packet, GuestTimeoutToMilliseconds(timeout)))
+        return STATUS_TIMEOUT;
+
+    if (keyContext != nullptr)
+        *keyContext = packet.key;
+    if (apcContext != nullptr)
+        *apcContext = packet.apcContext;
+    if (ioStatusBlock != nullptr)
+    {
+        ioStatusBlock->Status = packet.status;
+        ioStatusBlock->Information = packet.information;
+    }
+    return X_STATUS_SUCCESS;
+}
+
+GUEST_FUNCTION_HOOK(__imp__NtCreateIoCompletion, NtCreateIoCompletion);
+GUEST_FUNCTION_HOOK(__imp__NtSetIoCompletion, NtSetIoCompletion);
+GUEST_FUNCTION_HOOK(__imp__NtRemoveIoCompletion, NtRemoveIoCompletion);
 GUEST_FUNCTION_HOOK(__imp__NtCreateFile, NtCreateFile);
 GUEST_FUNCTION_HOOK(__imp__NtOpenFile, NtOpenFile);
 GUEST_FUNCTION_HOOK(__imp__NtReadFile, NtReadFile);
