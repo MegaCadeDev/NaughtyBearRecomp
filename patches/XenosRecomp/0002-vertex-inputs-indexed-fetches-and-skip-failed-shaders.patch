@@ -1,0 +1,191 @@
+--- a/XenosRecomp/main.cpp
++++ b/XenosRecomp/main.cpp
+@@ -141,7 +141,13 @@
+ #endif
+ 
+                 IDxcBlob* spirv = dxcCompiler.compile(recompiler.out, recompiler.isPixelShader, false, true);
+-                assert(spirv != nullptr);
++                if (spirv == nullptr)
++                {
++                    // Leave the shader out of the cache rather than failing the whole run.
++                    fmt::println("Shader {:016x} failed to compile; skipping it", hashShaderPair.first);
++                    ++progress;
++                    return;
++                }
+ 
+                 bool result = smolv::Encode(spirv->GetBufferPointer(), spirv->GetBufferSize(), shader.spirv, smolv::kEncodeFlagStripDebugInfo);
+                 assert(result);
+@@ -164,6 +170,9 @@
+ 
+         for (auto& [hash, shader] : shaders)
+         {
++            if (shader.spirv.empty())
++                continue;
++
+             f.println("\t{{ 0x{:X}, {}, {}, {}, {}, {} }},",
+                 hash, dxil.size(), (shader.dxil != nullptr) ? shader.dxil->GetBufferSize() : 0, spirv.size(), shader.spirv.size(), shader.specConstantsMask);
+ 
+--- a/XenosRecomp/shader_common.h
++++ b/XenosRecomp/shader_common.h
+@@ -31,6 +31,21 @@
+ #define g_HalfPixelOffset          vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 264)
+ #define g_AlphaThreshold           vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 272)
+ 
++// Vertex fetches indexed by a computed register (not the vertex index), such as bone
++// palettes: the runtime gives each vertex input location its stream's decoded data
++// ({ address, stride, offset } from shared constants + 288), one float4 per element.
++float4 vfetchIndexed(uint location, float index, bool rounded)
++{
++    uint64_t entry = g_PushConstants.SharedConstants + 288 + location * 16;
++    uint64_t address = vk::RawBufferLoad<uint64_t>(entry);
++    if (address == 0)
++        return 0.0;
++    uint stride = vk::RawBufferLoad<uint>(entry + 8);
++    uint offset = vk::RawBufferLoad<uint>(entry + 12);
++    uint element = uint(max(rounded ? round(index) : floor(index), 0.0));
++    return vk::RawBufferLoad<float4>(address + uint64_t(element) * stride + offset, 4);
++}
++
+ [[vk::constant_id(0)]] const uint g_SpecConstants = 0;
+ 
+ #define g_SpecConstants() g_SpecConstants
+@@ -45,6 +60,11 @@
+ 
+ uint g_SpecConstants();
+ 
++float4 vfetchIndexed(uint location, float index, bool rounded)
++{
++    return 0.0;
++}
++
+ #endif
+ 
+ Texture2D<float4> g_Texture2DDescriptorHeap[] : register(t0, space0);
+--- a/XenosRecomp/shader_recompiler.cpp
++++ b/XenosRecomp/shader_recompiler.cpp
+@@ -1,6 +1,8 @@
+ #include "shader_recompiler.h"
+ #include "shader_common.h"
+ 
++#include <set>
++
+ static constexpr char SWIZZLES[] = 
+ { 
+     'x',
+@@ -99,6 +101,14 @@
+     { DeclUsage::BlendWeight, 1, 16 },
+     { DeclUsage::BlendWeight, 2, 17 },
+     { DeclUsage::BlendWeight, 3, 18 },
++    { DeclUsage::BlendIndices, 1, 19 },
++    { DeclUsage::BlendIndices, 2, 20 },
++    { DeclUsage::BlendIndices, 3, 21 },
++    { DeclUsage::Normal, 1, 22 },
++    { DeclUsage::Tangent, 1, 23 },
++    { DeclUsage::Binormal, 1, 24 },
++    { DeclUsage::Color, 2, 25 },
++    { DeclUsage::Color, 3, 26 },
+ };
+ 
+ static constexpr std::pair<DeclUsage, size_t> INTERPOLATORS[] =
+@@ -165,6 +175,12 @@
+ 
+ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t address)
+ {
++    if (!instr.isMiniFetch)
++    {
++        lastFetchRegister = instr.srcRegister;
++        lastFetchSwizzle = instr.srcSwizzle;
++    }
++
+     if (instr.isPredicated)
+     {
+         indent();
+@@ -184,6 +200,53 @@
+     auto findResult = vertexElements.find(address);
+     assert(findResult != vertexElements.end());
+ 
++    // Per-vertex fetches are indexed by the vertex index in r0.x and become vertex inputs;
++    // any other index register reads the stream's data directly (Naughty Bear's bone
++    // palettes are fetched this way).
++    if (lastFetchRegister != 0 || lastFetchSwizzle != 0)
++    {
++        uint32_t location = ~0u;
++        for (auto& usageLocation : USAGE_LOCATIONS)
++        {
++            if (usageLocation.usage == findResult->second.usage && usageLocation.usageIndex == findResult->second.usageIndex)
++            {
++                location = usageLocation.location;
++                break;
++            }
++        }
++
++        std::string fetch = fmt::format("vfetchIndexed({}, r{}.{}, {})", location, lastFetchRegister, "xyzw"[lastFetchSwizzle],
++            instr.isIndexRounded ? "true" : "false");
++        switch (findResult->second.usage)
++        {
++        case DeclUsage::Normal:
++        case DeclUsage::Tangent:
++        case DeclUsage::Binormal:
++            specConstantsMask |= SPEC_CONSTANT_R11G11B10_NORMAL;
++            print("tfetchR11G11B10(asuint({}))", fetch);
++            break;
++        case DeclUsage::TexCoord:
++            print("tfetchTexcoord(g_SwappedTexcoords, {}, {})", fetch, uint32_t(findResult->second.usageIndex));
++            break;
++        default:
++            out += fetch;
++            break;
++        }
++
++        out += '.';
++        printDstSwizzle(instr.dstSwizzle, true);
++        out += ";\n";
++        printDstSwizzle01(instr.dstRegister, instr.dstSwizzle);
++
++        if (instr.isPredicated)
++        {
++            --indentation;
++            indent();
++            out += "}\n";
++        }
++        return;
++    }
++
+     switch (findResult->second.usage)
+     {
+     case DeclUsage::Normal:
+@@ -1313,6 +1376,7 @@
+     else
+     {
+         auto vertexShader = reinterpret_cast<const VertexShader*>(shader);
++        std::set<std::pair<uint32_t, uint32_t>> declaredInputs;
+         for (uint32_t i = 0; i < vertexShader->vertexElementCount; i++)
+         {
+             union
+@@ -1325,6 +1389,14 @@
+ 
+             const char* usageType = USAGE_TYPES[uint32_t(vertexElement.usage)];
+ 
++            // A shader can fetch the same element more than once (at different addresses);
++            // declare the input once and map every fetch to it.
++            if (!declaredInputs.emplace(uint32_t(vertexElement.usage), uint32_t(vertexElement.usageIndex)).second)
++            {
++                vertexElements.emplace(uint32_t(vertexElement.address), vertexElement);
++                continue;
++            }
++
+         #ifdef UNLEASHED_RECOMP
+             if ((vertexElement.usage == DeclUsage::TexCoord && vertexElement.usageIndex == 2 && isMetaInstancer) ||
+                 (vertexElement.usage == DeclUsage::Position && vertexElement.usageIndex == 1))
+--- a/XenosRecomp/shader_recompiler.h
++++ b/XenosRecomp/shader_recompiler.h
+@@ -33,6 +33,9 @@
+     std::unordered_map<uint32_t, const char*> samplers;
+     std::unordered_map<uint32_t, uint32_t> ifEndLabels;
+     uint32_t specConstantsMask = 0;
++    // The index register of the last full vertex fetch (mini fetches reuse it).
++    uint32_t lastFetchRegister = 0;
++    uint32_t lastFetchSwizzle = 0;
+ 
+ #ifdef UNLEASHED_RECOMP
+     bool hasMtxProjection = false;

@@ -121,6 +121,9 @@ namespace
         RB_BLENDCONTROL0 = 0x2201,
         RB_COLORCONTROL = 0x2202,
         PA_CL_VTE_CNTL = 0x2206,
+        // SetScissorRect (0x82F29630) keeps the scissor here: x in bits 0-14, y in 16-30.
+        PA_SC_SCISSOR_TL = 0x2011,
+        PA_SC_SCISSOR_BR = 0x2012,
     };
 
     constexpr uint32_t PRESENT_WIDTH = 1280;
@@ -134,6 +137,8 @@ namespace
     constexpr uint64_t UPLOAD_BUFFER_SIZE = 128 * 1024 * 1024;
     // Host vertex buffers unused for this many frames are released.
     constexpr uint64_t VERTEX_BUFFER_LIFETIME = 600;
+    // Vertex streams smaller than this are decoded per draw instead of cached.
+    constexpr uint32_t SMALL_STREAM_SIZE = 16 * 1024;
 
     enum NullDescriptor : uint32_t
     {
@@ -163,7 +168,17 @@ namespace
         float halfPixelOffsetX{};
         float halfPixelOffsetY{};
         float alphaThreshold{};
+        uint32_t reserved[3]{};
+        // Per vertex input location: its stream's decoded data, for vertex fetches indexed
+        // by a computed register (vfetchIndexed in patches/XenosRecomp).
+        struct
+        {
+            uint64_t address;
+            uint32_t stride;
+            uint32_t offset;
+        } fetches[32]{};
     };
+    static_assert(offsetof(SharedConstants, fetches) == 288);
 
     struct PushConstants
     {
@@ -259,6 +274,7 @@ namespace
         uint32_t sourceOffset;
         uint32_t type;
         ElementClass elementClass;
+        uint8_t location;
     };
 
     // The elements of one vertex stream, in host order (16 bytes each).
@@ -570,13 +586,13 @@ namespace
         case 33: // k_32
         case 34: // k_32_32
         case 35: // k_32_32_32_32
-            for (uint32_t i = 0; i < format - 32; i++)
+            for (uint32_t i = 0; i < (format == 35 ? 4u : format - 32); i++)
                 component[i] = convert(load32(i), 32);
             break;
         case 36: // k_32_FLOAT
         case 37: // k_32_32_FLOAT
         case 38: // k_32_32_32_32_FLOAT
-            for (uint32_t i = 0; i < format - 35; i++)
+            for (uint32_t i = 0; i < (format == 38 ? 4u : format - 35); i++)
                 component[i] = std::bit_cast<float>(load32(i));
             break;
         case 57: // k_32_32_32_FLOAT
@@ -678,7 +694,7 @@ namespace
             StreamLayout& layout = layouts[streamIndex[stream]];
             ElementClass elementClass = GetElementClass(usage);
             uint32_t hostOffset = layout.HostStride();
-            layout.elements.push_back({ offset, type, elementClass });
+            layout.elements.push_back({ offset, type, elementClass, uint8_t(location) });
 
             RenderFormat format = elementClass == ElementClass::Float ? RenderFormat::R32G32B32A32_FLOAT : RenderFormat::R32G32B32A32_UINT;
             declaration.inputElements.emplace_back(ConvertDeclUsage(usage), usageIndex, location, format, stream, hostOffset);
@@ -736,7 +752,8 @@ namespace
         uint64_t hostSize = uint64_t(vertexCount) * layout.HostStride();
         if (!entry.buffer || entry.size < hostSize)
         {
-            entry.buffer = g_device->createBuffer(RenderBufferDesc::VertexBuffer(hostSize, RenderHeapType::UPLOAD));
+            // CONSTANT gives the buffer a device address, for indexed fetches.
+            entry.buffer = g_device->createBuffer(RenderBufferDesc::VertexBuffer(hostSize, RenderHeapType::UPLOAD, RenderBufferFlag::CONSTANT));
             entry.size = hostSize;
         }
         entry.contentHash = contentHash;
@@ -1653,7 +1670,12 @@ namespace
             auto vs = g_shaderHashes.find(Load32(g_guestDevice + DEVICE_VERTEX_SHADER));
             auto ps = g_shaderHashes.find(Load32(g_guestDevice + DEVICE_PIXEL_SHADER));
             if (vs == g_shaderHashes.end() || ps == g_shaderHashes.end())
+            {
+                static int reported = 0;
+                if (reported++ < 10)
+                    LOGF_WARNING("Unknown shader objects: vs {:08X} ps {:08X}", Load32(g_guestDevice + DEVICE_VERTEX_SHADER), Load32(g_guestDevice + DEVICE_PIXEL_SHADER));
                 return Skip("no vertex or pixel shader bound");
+            }
             vsHash = vs->second;
             psHash = ps->second;
         }
@@ -1666,6 +1688,11 @@ namespace
         const VertexDeclaration* declaration = GetDeclaration(Load32(g_guestDevice + DEVICE_VERTEX_DECLARATION));
         if (declaration == nullptr)
             return Skip("no vertex declaration");
+
+        // NB_ONLY_DECL=hash draws only geometry with that vertex declaration (debugging).
+        static const uint64_t onlyDeclaration = [] { const char* v = getenv("NB_ONLY_DECL"); return v ? std::stoull(v, nullptr, 16) : 0ull; }();
+        if (onlyDeclaration != 0 && declaration->hash != onlyDeclaration && !call.userPointer)
+            return;
 
         // Indices, as a list topology.
         static std::vector<uint32_t> indices;
@@ -1711,6 +1738,7 @@ namespace
         RenderVertexBufferView views[MAX_STREAMS];
         RenderInputSlot slots[MAX_STREAMS];
         uint32_t streamSlots[MAX_STREAMS];
+        uint64_t streamAddresses[MAX_STREAMS]{};
         uint32_t streamCount = 0;
         for (const auto& layout : declaration->streams)
         {
@@ -1724,6 +1752,7 @@ namespace
                     return Skip("upload buffer full");
                 DecodeVertices(layout, (const uint8_t*)g_memory.Translate(call.vertexData), call.vertexStride, call.vertexCount, memory);
                 views[streamCount] = RenderVertexBufferView(g_uploadBuffer->at(offset), uint32_t(hostSize));
+                streamAddresses[streamCount] = g_uploadAddress + offset;
             }
             else
             {
@@ -1736,12 +1765,29 @@ namespace
                     return Skip("vertex stream not set");
                 uint32_t address = GpuToGuest(fetch0 & 0xFFFFFFFC);
                 uint32_t size = fetch1 & 0x3FFFFFC;
-                uint32_t vertexCount = 0;
-                const RenderBuffer* buffer = GetVertexBuffer(layout, address, size, stride, vertexCount);
-                if (buffer == nullptr)
-                    return Skip("empty vertex buffer");
-                views[streamCount] = RenderVertexBufferView(buffer, uint32_t(uint64_t(vertexCount) * layout.HostStride()));
-                if (DebugThisFrame() && g_drawsThisFrame < 4)
+                if (size < SMALL_STREAM_SIZE)
+                {
+                    // Small streams (bone palettes, per-object data) can be rewritten between
+                    // draws, so they are decoded for each draw.
+                    uint32_t vertexCount = size / stride;
+                    uint64_t hostSize = std::max<uint64_t>(uint64_t(vertexCount) * layout.HostStride(), 16);
+                    auto [memory, offset] = Allocate(hostSize);
+                    if (memory == nullptr)
+                        return Skip("upload buffer full");
+                    DecodeVertices(layout, (const uint8_t*)g_memory.Translate(address), stride, vertexCount, memory);
+                    views[streamCount] = RenderVertexBufferView(g_uploadBuffer->at(offset), uint32_t(hostSize));
+                    streamAddresses[streamCount] = g_uploadAddress + offset;
+                }
+                else
+                {
+                    uint32_t vertexCount = 0;
+                    const RenderBuffer* buffer = GetVertexBuffer(layout, address, size, stride, vertexCount);
+                    if (buffer == nullptr)
+                        return Skip("empty vertex buffer");
+                    views[streamCount] = RenderVertexBufferView(buffer, uint32_t(uint64_t(vertexCount) * layout.HostStride()));
+                    streamAddresses[streamCount] = buffer->getDeviceAddress();
+                }
+                if (DebugThisFrame() && (g_drawsThisFrame < 4 || declaration->streams.size() > 1))
                 {
                     float v[4];
                     DecodeVertexElement((const uint8_t*)g_memory.Translate(address) + stride * (call.baseVertex + indices[0]) + layout.elements[0].sourceOffset, layout.elements[0].type, v);
@@ -1776,6 +1822,12 @@ namespace
         uint32_t psBooleans = Load32(g_guestDevice + DEVICE_BOOL_CONSTANTS + 16);
         shared.booleans = (vsBooleans & 0xFFFF) | (psBooleans << 16);
         shared.swappedTexcoords = 0; // vertex data is decoded per element
+        for (uint32_t i = 0; i < streamCount; i++)
+        {
+            const StreamLayout& layout = declaration->streams[i];
+            for (uint32_t element = 0; element < layout.elements.size(); element++)
+                shared.fetches[layout.elements[element].location] = { streamAddresses[i], layout.HostStride(), element * 16 };
+        }
 
         if (!BindTargets())
             return Skip("no render target");
@@ -1831,6 +1883,15 @@ namespace
             viewport.maxDepth = std::clamp(zOffset + zScale, 0.0f, 1.0f);
         }
         RenderRect scissor(0, 0, int32_t(targetWidth), int32_t(targetHeight));
+        uint32_t scissorTopLeft = Reg(PA_SC_SCISSOR_TL);
+        uint32_t scissorBottomRight = Reg(PA_SC_SCISSOR_BR);
+        if (scissorBottomRight != 0)
+        {
+            scissor.left = std::min<int32_t>(scissorTopLeft & 0x7FFF, targetWidth);
+            scissor.top = std::min<int32_t>((scissorTopLeft >> 16) & 0x7FFF, targetHeight);
+            scissor.right = std::clamp<int32_t>(scissorBottomRight & 0x7FFF, scissor.left, targetWidth);
+            scissor.bottom = std::clamp<int32_t>((scissorBottomRight >> 16) & 0x7FFF, scissor.top, targetHeight);
+        }
 
         PushConstants pushConstants{ g_uploadAddress + vsOffset, g_uploadAddress + psOffset, g_uploadAddress + sharedOffset };
 
@@ -1843,8 +1904,8 @@ namespace
 
         if (DebugThisFrame())
         {
-            LOGF_IMPL(Utility, "draw", "#{} prim {} count {} indexed {} up {} vs {:016x} ps {:016x} rt {}x{} depth {} blend {:08X} zctl {:08X} vte {:08X} vp ({:.1f},{:.1f} {:.1f}x{:.1f} z {:.3f}-{:.3f}) streams {}",
-                g_drawsThisFrame, call.primitiveType, call.count, call.indexed, call.userPointer, vsHash, psHash, targetWidth, targetHeight,
+            LOGF_IMPL(Utility, "draw", "#{} decl {:016x} prim {} count {} indexed {} up {} vs {:016x} ps {:016x} rt {}x{} depth {} blend {:08X} zctl {:08X} vte {:08X} vp ({:.1f},{:.1f} {:.1f}x{:.1f} z {:.3f}-{:.3f}) streams {}",
+                g_drawsThisFrame, declaration->hash, call.primitiveType, call.count, call.indexed, call.userPointer, vsHash, psHash, targetWidth, targetHeight,
                 g_boundDepth != nullptr, key.blendControl, key.depthControl, vte, viewport.x, viewport.y, viewport.width, viewport.height,
                 viewport.minDepth, viewport.maxDepth, streamCount);
         }
