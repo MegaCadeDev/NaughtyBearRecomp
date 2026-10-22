@@ -11,13 +11,15 @@ place it in `game/` (the executable at `game/Naughty_Bear/Default.xex`).
 
 ## Status
 
-The whole executable recompiles and builds. The game boots, renders its title screen
-and menus in a Vulkan window, takes controller and keyboard input, saves, and loads
-into levels: draws are replayed with the game's shaders (translated by XenosRecomp)
-and textures. In levels only the HUD and 2D elements show so far: render states, depth,
-render-to-texture and the buffer-based draws the 3D world uses are still to do
-(`docs/d3d_map.md`), as is audio output. Saves are kept in `save/` (one folder per save
+The whole executable recompiles and builds. The game boots, takes controller and keyboard
+input, saves, and plays: menus and levels render in a Vulkan window with the game's
+shaders (translated by XenosRecomp), textures, render targets, depth/stencil and render
+states, including skinned characters. Saves are kept in `save/` (one folder per save
 container) and persist between runs.
+
+Audio goes out through SDL. The game's sounds are XMA, decoded with FFmpeg
+(`sudo apt install libavcodec-dev libavutil-dev`, then re-run CMake); without FFmpeg the
+game runs silent. `NB_VOLUME=0..1` sets the volume, `NB_SURROUND=1` asks for 5.1 output.
 
 Shaders the game creates are written to `shaders/dump/` while it runs (or to
 `NB_DUMP_SHADERS=dir`). Playing through new areas collects their shaders; then run
@@ -25,7 +27,9 @@ Shaders the game creates are written to `shaders/dump/` while it runs (or to
 not in the cache yet are skipped.
 
 Debug options: `NB_SCREENSHOT=file.ppm[:frame]` (convert with `tools/ppm2png.py`),
-`NB_DEBUG_DRAWS=frame`, `NB_NO_BLEND=1`, `NB_DEBUG_CLEAR=1`, `NB_LOG_FILES=1`.
+`NB_DEBUG_DRAWS=frame` (log every draw of a frame), `NB_DEBUG_DECLS=1`, `NB_NO_BLEND=1`,
+`NB_NO_DEPTH=1`, `NB_SHOW_RESOLVE=address` (present a resolved texture),
+`NB_ONLY_DECL=hash`, `NB_LOG_FILES=1`.
 
 ## Controls
 
@@ -49,7 +53,8 @@ testing.
 ## Building
 
 Requires Clang 18+, CMake 3.20+, Ninja, SDL2 and Vulkan
-(`sudo apt install libsdl2-dev libvulkan-dev`).
+(`sudo apt install libsdl2-dev libvulkan-dev glslang-tools`), and FFmpeg for audio
+(`sudo apt install libavcodec-dev libavutil-dev`).
 
 ```bash
 git submodule update --init --recursive

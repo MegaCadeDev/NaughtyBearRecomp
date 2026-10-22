@@ -33,4 +33,7 @@ Files written for this project: `src/kernel/virtual_memory.cpp`, `src/kernel/io/
 - [XenosRecomp](https://github.com/hedge-dev/XenosRecomp) (MIT), submodule, with the patches in `patches/XenosRecomp/`.
 - [plume](https://github.com/renderbag/plume) (MIT), submodule, the renderer abstraction Unleashed Recompiled uses.
 - [SDL2](https://www.libsdl.org/) (zlib), from the system.
-- Behaviour of several instructions and kernel functions follows [Xenia](https://github.com/xenia-project/xenia) (BSD-3-Clause); no Xenia code is included.
+- Behaviour of several instructions and kernel functions, the Xenos register and fetch
+  constant layouts, and the XMA decoder context layout and registers follow
+  [Xenia](https://github.com/xenia-project/xenia) (BSD-3-Clause); no Xenia code is included.
+- XMA audio is decoded with [FFmpeg](https://ffmpeg.org) (LGPL-2.1+), linked dynamically.

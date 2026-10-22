@@ -2,6 +2,7 @@
 // main.cpp (KiSystemStartup / LdrLoadModule), without its installer, UI and mod loader.
 
 #include <stdafx.h>
+#include <apu/xma.h>
 #include <apu/audio.h>
 #include <cpu/guest_thread.h>
 #include <gpu/video.h>
@@ -68,6 +69,7 @@ static void KiSystemStartup()
     XamContentCreateEx(0, "D", &gameContent, OPEN_EXISTING, nullptr, nullptr, 0, 0, nullptr);
 
     XAudioInitializeSystem();
+    xma::Init();
 }
 
 // Loads the executable into guest memory and returns its entry point.

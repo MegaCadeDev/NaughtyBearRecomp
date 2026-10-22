@@ -106,4 +106,16 @@ target_include_directories(NaughtyBear PRIVATE
     tools/XenosRecomp/thirdparty/zstd/lib
     ${HOST_SHADER_DIR})
 target_precompile_headers(NaughtyBear PRIVATE src/stdafx.h)
+
+# FFmpeg decodes XMA audio (src/apu/xma.cpp); without it the game runs silent.
+find_package(PkgConfig QUIET)
+if (PKG_CONFIG_FOUND)
+    pkg_check_modules(FFMPEG IMPORTED_TARGET libavcodec libavutil)
+endif()
+if (FFMPEG_FOUND)
+    target_compile_definitions(NaughtyBear PRIVATE NB_HAVE_FFMPEG)
+    target_link_libraries(NaughtyBear PRIVATE PkgConfig::FFMPEG)
+else()
+    message(WARNING "FFmpeg (libavcodec, libavutil) not found: audio will be silent. Install libavcodec-dev and libavutil-dev.")
+endif()
 target_link_libraries(NaughtyBear PRIVATE NaughtyBearRecompLib XenonUtils o1heap fmt::fmt xxHash::xxhash plume SDL2::SDL2 libzstd_static smolv)

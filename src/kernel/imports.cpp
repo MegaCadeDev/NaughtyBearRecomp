@@ -1,4 +1,5 @@
 #include <stdafx.h>
+#include <apu/xma.h>
 #include <cpu/ppc_context.h>
 #include <cpu/guest_thread.h>
 #include <apu/audio.h>
@@ -867,8 +868,8 @@ uint32_t VdInitializeRingBuffer()
 
 uint32_t MmGetPhysicalAddress(uint32_t address)
 {
-    LOGF_UTILITY("0x{:x}", address);
-    return address;
+    // Physical memory is mapped once, at 0xA0000000 (kernel/heap.cpp).
+    return address >= 0xA0000000 ? (address & 0x1FFFFFFF) : address;
 }
 
 uint32_t VdSetSystemCommandBufferGpuIdentifierAddress()
@@ -1580,22 +1581,18 @@ void KeInitializeSemaphore(XKSEMAPHORE* semaphore, uint32_t count, uint32_t limi
 
 uint32_t XMAReleaseContext(uint32_t context)
 {
-    if (context != 0)
-        g_userHeap.Free(g_memory.Translate(context));
+    xma::ReleaseContext(context);
     return 0;
 }
 
-// XMA hardware decoder contexts. The game programs them through guest memory; decoding is
-// not implemented yet, so contexts are just zeroed storage the game can safely write.
+// XMA hardware decoder contexts (apu/xma.cpp).
 uint32_t XMACreateContext(be<uint32_t>* contextOut)
 {
     if (contextOut == nullptr)
         return 0xC000000D; // STATUS_INVALID_PARAMETER
-    constexpr size_t XMA_CONTEXT_SIZE = 64;
-    void* context = g_userHeap.AllocPhysical(XMA_CONTEXT_SIZE, 256);
-    memset(context, 0, XMA_CONTEXT_SIZE);
-    *contextOut = g_memory.MapVirtual(context);
-    return 0;
+    uint32_t context = xma::AllocateContext();
+    *contextOut = context;
+    return context != 0 ? 0 : 0xC0000017; // STATUS_NO_MEMORY
 }
 
 // uint32_t XAudioRegisterRenderDriverClient(be<uint32_t>* callback, be<uint32_t>* driver)
