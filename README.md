@@ -6,8 +6,12 @@ Roadmap:
 1. PC port (Linux first) built on XenonRecomp and Unleashed Recompiled's runtime.
 2. PS5 homebrew port.
 
-No game data is included. You need your own legally dumped copy of the game;
-place it in `game/` (the executable at `game/Naughty_Bear/Default.xex`).
+No game data is included. You need your own legally dumped copy of the game; put its
+files in a `game/` folder (any layout below it, e.g. `game/Naughty_Bear/Default.xex`).
+Starting the program finds `Default.xex` there: in a `game` folder next to the
+executable, in the working directory, or in a parent of the executable's folder. A path
+to the game can also be given on the command line. Saves (`save/`) and the shader cache
+(`cache/`) are kept next to the `game` folder.
 
 ## Status
 
@@ -64,7 +68,7 @@ git submodule update --init --recursive
 tools/recompile.sh
 CC=clang CXX=clang++ cmake -S . -B build/game -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build/game
-./build/game/NaughtyBear game/Naughty_Bear/Default.xex
+./build/game/NaughtyBear
 ```
 
 ## License

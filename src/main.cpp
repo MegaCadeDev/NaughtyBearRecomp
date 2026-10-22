@@ -36,9 +36,13 @@ std::filesystem::path& GetGamePath()
     return g_gamePath;
 }
 
+// Saves and the shader cache live next to the "game" folder (the working directory when
+// the game's path is given on the command line).
+static std::filesystem::path g_userPath = std::filesystem::current_path();
+
 std::filesystem::path GetSavePath(bool checkForMods)
 {
-    return std::filesystem::current_path() / "save";
+    return g_userPath / "save";
 }
 
 static void OnCrash(int sig, siginfo_t* info, void*)
@@ -118,14 +122,79 @@ static uint32_t LdrLoadModule(const std::filesystem::path& path)
     return uint32_t(image.entry_point);
 }
 
+// Finds Default.xex in a "game" folder (searched with its subfolders) next to the executable,
+// in the working directory, or in a parent of the executable's folder.
+static std::filesystem::path FindGameExecutable()
+{
+    std::error_code ec;
+    std::vector<std::filesystem::path> roots;
+    auto executableDir = std::filesystem::read_symlink("/proc/self/exe", ec).parent_path();
+    if (!ec)
+    {
+        for (auto dir = executableDir; !dir.empty(); dir = dir.parent_path())
+        {
+            roots.push_back(dir / "game");
+            if (dir == dir.root_path() || roots.size() >= 4)
+                break;
+        }
+    }
+    roots.insert(roots.begin() + std::min<size_t>(1, roots.size()), std::filesystem::current_path(ec) / "game");
+
+    for (const auto& root : roots)
+    {
+        if (!std::filesystem::is_directory(root, ec))
+            continue;
+        for (auto it = std::filesystem::recursive_directory_iterator(root, std::filesystem::directory_options::skip_permission_denied, ec);
+             it != std::filesystem::recursive_directory_iterator(); it.increment(ec))
+        {
+            if (ec)
+                break;
+            if (it.depth() > 4)
+            {
+                it.disable_recursion_pending();
+                continue;
+            }
+            std::string name = it->path().filename().string();
+            std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+            if (name == "default.xex" && it->is_regular_file(ec))
+            {
+                LOGFN("Found the game at {}", it->path().string());
+                return it->path();
+            }
+        }
+    }
+    return {};
+}
+
 int main(int argc, char** argv)
 {
     os::logger::Init();
     setvbuf(stdout, nullptr, _IONBF, 0); // keep log lines when the process dies
 
-    std::filesystem::path xexPath = argc > 1 ? argv[1] : "game/Naughty_Bear/Default.xex";
-    if (std::filesystem::is_directory(xexPath))
-        xexPath /= "Default.xex";
+    std::filesystem::path xexPath;
+    if (argc > 1)
+    {
+        xexPath = argv[1];
+        if (std::filesystem::is_directory(xexPath))
+            xexPath /= "Default.xex";
+    }
+    else
+    {
+        xexPath = FindGameExecutable();
+        if (xexPath.empty())
+        {
+            LOGN_ERROR("Could not find the game: put its files (with Default.xex) in a \"game\" folder next to the executable.");
+            return EXIT_FAILURE;
+        }
+        for (auto dir = xexPath.parent_path(); dir.has_relative_path(); dir = dir.parent_path())
+        {
+            if (dir.filename() == "game")
+            {
+                g_userPath = dir.parent_path();
+                break;
+            }
+        }
+    }
     g_gamePath = std::filesystem::absolute(xexPath).parent_path();
 
     if (g_memory.base == nullptr)

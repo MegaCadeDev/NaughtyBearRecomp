@@ -7,5 +7,5 @@
 // Game files: the folder holding Default.xex, set at startup.
 std::filesystem::path& GetGamePath();
 
-// Save data, next to the executable's working directory for now.
+// Save data, next to the folder the game files are in (see main.cpp).
 std::filesystem::path GetSavePath(bool checkForMods);
