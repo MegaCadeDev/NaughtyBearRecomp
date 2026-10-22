@@ -33,3 +33,59 @@ setjmp_address = 0x83096C10
 invalid_instructions = [
     { data = 0x00000000, size = 4 }, # Padding
 ]
+
+# Leaf functions containing jump tables, which XenonRecomp's analyzer cuts short.
+# BEGIN nb_switch_tables functions
+functions = [
+    { address = 0x82B41690, size = 0x8C }, # switch at 0x82B416AC
+    { address = 0x82BB7880, size = 0xA4 }, # switch at 0x82BB78A4
+    { address = 0x82BC1538, size = 0xD8 }, # switch at 0x82BC1564
+    { address = 0x82BC1610, size = 0xC8 }, # switch at 0x82BC1630
+    { address = 0x82BC16D8, size = 0x8 }, # code shared with range at 0x82BC1538
+    { address = 0x82C128B8, size = 0x84 }, # switch at 0x82C128D8
+    { address = 0x82C5CAE0, size = 0x188 }, # switch at 0x82C5CB08
+    { address = 0x82E012A0, size = 0xCC }, # switch at 0x82E012BC
+    { address = 0x82F0FFB8, size = 0x50 }, # switch at 0x82F0FFF4
+    { address = 0x82F10008, size = 0xC }, # code shared with range at 0x82F1025C
+    { address = 0x82F10014, size = 0x8 }, # code shared with range at 0x82F1025C
+    { address = 0x82F1001C, size = 0xC }, # code shared with range at 0x82F10008
+    { address = 0x82F10028, size = 0x14 }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F1003C, size = 0x14 }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F10050, size = 0x14 }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F10064, size = 0x14 }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F10078, size = 0x14 }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F1008C, size = 0x14 }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F100A0, size = 0x14 }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F100B4, size = 0x14 }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F100C8, size = 0x14 }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F100DC, size = 0x14 }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F100F0, size = 0x14 }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F10104, size = 0x14 }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F10118, size = 0x14 }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F1012C, size = 0x14 }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F10140, size = 0x14 }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F10154, size = 0x14 }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F10168, size = 0x14 }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F1017C, size = 0x14 }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F10190, size = 0x14 }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F101A4, size = 0x14 }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F101B8, size = 0x14 }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F101CC, size = 0x14 }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F101E0, size = 0x14 }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F101F4, size = 0x14 }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F10208, size = 0x18 }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F10220, size = 0x14 }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F10234, size = 0x14 }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F10248, size = 0x14 }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F1025C, size = 0xE8 }, # switch at 0x82F1028C
+    { address = 0x82F10344, size = 0xC }, # code shared with range at 0x82F0FFB8
+    { address = 0x82F91B78, size = 0x114 }, # switch at 0x82F91BBC
+    { address = 0x82FE0268, size = 0x110 }, # switch at 0x82FE02A8
+    { address = 0x830F33A0, size = 0x80 }, # switch at 0x830F33D8
+    { address = 0x831E1898, size = 0x68 }, # switch at 0x831E18C4
+    { address = 0x831E1900, size = 0x64 }, # switch at 0x831E1930
+    { address = 0x831E1968, size = 0x5C }, # switch at 0x831E1998
+    { address = 0x831E19C8, size = 0x198 }, # switch at 0x831E19F8
+    { address = 0x831E1B60, size = 0x16C }, # switch at 0x831E1B94
+]
+# END nb_switch_tables functions

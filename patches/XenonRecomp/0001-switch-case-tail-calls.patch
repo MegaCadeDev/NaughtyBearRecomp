@@ -1,0 +1,25 @@
+diff --git a/XenonRecomp/recompiler.cpp b/XenonRecomp/recompiler.cpp
+index fa91527..e6c032a 100644
+--- a/XenonRecomp/recompiler.cpp
++++ b/XenonRecomp/recompiler.cpp
+@@ -617,8 +617,18 @@ bool Recompiler::Recompile(
+                 auto label = switchTable->second.labels[i];
+                 if (label < fn.base || label >= fn.base + fn.size)
+                 {
+-                    println("\t\t// ERROR: 0x{:X}", label);
+-                    fmt::println("ERROR: Switch case at {:X} is trying to jump outside function: {:X}", base, label);
++                    // A case that leaves the function is a tail call into code shared with another function.
++                    auto targetSymbol = image.symbols.find(label);
++                    if (targetSymbol != image.symbols.end() && targetSymbol->address == label && targetSymbol->type == Symbol_Function)
++                    {
++                        print("\t");
++                        printFunctionCall(label);
++                    }
++                    else
++                    {
++                        println("\t\t// ERROR: 0x{:X}", label);
++                        fmt::println("ERROR: Switch case at {:X} is trying to jump outside function: {:X}", base, label);
++                    }
+                     println("\t\treturn;");
+                 }
+                 else

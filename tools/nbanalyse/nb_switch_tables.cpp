@@ -14,7 +14,9 @@
 #include <xbox.h>
 #include <fmt/core.h>
 #include <fstream>
+#include <algorithm>
 #include <iterator>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -47,6 +49,7 @@ namespace
         uint32_t r = 0;
         uint32_t defaultLabel = 0;
         uint32_t entrySize = 0;
+        uint32_t tableAddr = 0;
         std::vector<uint32_t> labels;
     };
 
@@ -272,6 +275,7 @@ namespace
             return std::nullopt;
 
         table.entrySize = ctrValue->entrySize;
+        table.tableAddr = ctrValue->tableAddr;
         for (size_t i = 0; i < table.labels.size(); i++)
         {
             uint32_t entryAddr = ctrValue->tableAddr + i * ctrValue->entrySize;
@@ -296,18 +300,159 @@ namespace
     }
 }
 
+namespace
+{
+    // Address ranges covered by .pdata. Functions there already have exact sizes.
+    struct PdataRanges
+    {
+        std::map<uint32_t, uint32_t> ranges; // begin -> end
+
+        explicit PdataRanges(const Image& image)
+        {
+            const auto* pdata = image.Find(".pdata");
+            if (pdata == nullptr)
+                return;
+            auto* pf = (const IMAGE_CE_RUNTIME_FUNCTION*)pdata->data;
+            for (size_t i = 0; i < pdata->size / sizeof(IMAGE_CE_RUNTIME_FUNCTION); i++)
+            {
+                IMAGE_CE_RUNTIME_FUNCTION fn = pf[i];
+                fn.BeginAddress = ByteSwap(fn.BeginAddress);
+                fn.Data = ByteSwap(fn.Data);
+                ranges[fn.BeginAddress] = fn.BeginAddress + fn.FunctionLength * 4;
+            }
+        }
+
+        bool Contains(uint32_t addr) const
+        {
+            auto it = ranges.upper_bound(addr);
+            return it != ranges.begin() && addr < std::prev(it)->second;
+        }
+
+        bool IsStart(uint32_t addr) const { return ranges.count(addr) != 0; }
+    };
+
+    constexpr uint32_t kBlr = 0x4E800020;
+    constexpr uint32_t kBctr = 0x4E800420;
+
+    bool IsTerminator(uint32_t insn)
+    {
+        // blr, bctr, or b without link
+        return insn == kBlr || insn == kBctr || ((insn >> 26) == 18 && (insn & 1) == 0);
+    }
+
+    std::optional<uint32_t> BranchTarget(uint32_t insn, uint32_t addr)
+    {
+        uint32_t op = insn >> 26;
+        if (op == 16 && (insn & 2) == 0) // bc
+            return addr + uint32_t(int32_t(int16_t(insn & 0xFFFC)));
+        if (op == 18 && (insn & 2) == 0) // b
+            return addr + uint32_t((int32_t(insn << 6) >> 6) & ~3);
+        return std::nullopt;
+    }
+
+    // Bounds of a leaf function (no .pdata entry) that contains a jump table.
+    // XenonRecomp's analyzer treats the bctr as a tail call and ends the function there,
+    // cutting off the case bodies, so these need explicit boundaries.
+    std::optional<std::pair<uint32_t, uint32_t>> LeafFunctionBounds(const Image& image, const Section& section, const PdataRanges& pdata, const SwitchTable& table)
+    {
+        auto read = [&](uint32_t addr) { return ByteSwap(*(const uint32_t*)(section.data + (addr - section.base))); };
+        uint32_t sectionEnd = uint32_t(section.base + section.size);
+        uint32_t tableEnd = table.tableAddr + uint32_t(table.labels.size()) * table.entrySize;
+        auto inTable = [&](uint32_t addr) { return addr + 4 > table.tableAddr && addr < tableEnd; };
+
+        // Start: walk back to the instruction after the previous terminator or padding word.
+        // A terminator can also be an early return, so keep going while the block before it
+        // branches forward past the terminator into the code we already have.
+        auto walkBack = [&](uint32_t from)
+            {
+                uint32_t addr = from;
+                for (int n = 0; n < 1024 && addr > section.base; n++)
+                {
+                    uint32_t insn = read(addr - 4);
+                    if (insn == 0 || IsTerminator(insn) || pdata.Contains(addr - 4))
+                        break;
+                    addr -= 4;
+                }
+                return addr;
+            };
+
+        uint32_t start = walkBack(table.base);
+        for (int n = 0; n < 64 && start > section.base + 4; n++)
+        {
+            uint32_t terminator = start - 4;
+            if (read(terminator) == 0 || pdata.Contains(terminator))
+                break;
+            uint32_t blockStart = walkBack(terminator);
+            bool branchesIn = false;
+            for (uint32_t a = blockStart; a < terminator; a += 4)
+                if (auto target = BranchTarget(read(a), a); target && *target >= start && *target <= table.bctr)
+                    branchesIn = true;
+            if (!branchesIn)
+                break;
+            start = blockStart;
+        }
+
+        // End: the first terminator past every branch target seen so far.
+        uint32_t furthest = std::max(table.defaultLabel, *std::max_element(table.labels.begin(), table.labels.end()));
+        uint32_t addr = table.bctr + 4;
+        for (; addr < sectionEnd && addr < table.bctr + 0x10000; addr += 4)
+        {
+            if (inTable(addr))
+                continue;
+            if (pdata.IsStart(addr))
+                return std::make_pair(start, addr);
+
+            uint32_t insn = read(addr);
+            if (auto target = BranchTarget(insn, addr); target && *target > furthest && *target < table.bctr + 0x10000 && (insn >> 26) == 16)
+                furthest = *target;
+
+            if (addr >= furthest && IsTerminator(insn))
+                return std::make_pair(start, addr + 4);
+        }
+
+        return std::nullopt;
+    }
+
+    // Replace the text between the BEGIN/END markers in the main config.
+    bool WriteFunctionsToConfig(const std::string& path, const std::string& body)
+    {
+        std::ifstream in(path);
+        if (!in)
+            return false;
+        std::string text((std::istreambuf_iterator<char>(in)), {});
+        const std::string begin = "# BEGIN nb_switch_tables functions\n";
+        const std::string end = "# END nb_switch_tables functions\n";
+        auto b = text.find(begin);
+        auto e = text.find(end);
+        if (b == std::string::npos || e == std::string::npos || e < b)
+            return false;
+        text.replace(b + begin.size(), e - b - begin.size(), body);
+        std::ofstream(path).write(text.data(), text.size());
+        return true;
+    }
+}
+
 int main(int argc, char** argv)
 {
     if (argc < 3)
     {
-        fmt::println("Usage: nb_switch_tables [input XEX] [output TOML]");
+        fmt::println("Usage: nb_switch_tables [input XEX] [output switch table TOML] [main config TOML to update]");
         return EXIT_FAILURE;
     }
 
     const auto file = LoadFile(argv[1]);
     auto image = Image::ParseImage(file.data(), file.size());
 
+    PdataRanges pdata(image);
     std::string out = "# Generated by nb_switch_tables\n";
+    struct LeafFunction
+    {
+        uint32_t start, end, bctr, defaultLabel;
+        uint32_t tableAddr, tableEnd;
+        std::vector<uint32_t> labels;
+        const Section* section;
+    };
+    std::vector<LeafFunction> leafFunctions;
     size_t bctrs = 0, found = 0, outside = 0, sizes[5]{};
 
     for (const auto& section : image.sections)
@@ -344,6 +489,15 @@ int main(int argc, char** argv)
                 }
             }
 
+            if (!pdata.Contains(table->bctr))
+            {
+                if (auto bounds = LeafFunctionBounds(image, section, pdata, *table))
+                    leafFunctions.push_back({ bounds->first, bounds->second, table->bctr, table->defaultLabel,
+                        table->tableAddr, table->tableAddr + uint32_t(table->labels.size()) * table->entrySize, table->labels, &section });
+                else
+                    fmt::println("warning: could not bound leaf function around switch at 0x{:X}", table->bctr);
+            }
+
             out += fmt::format("# bctr 0x{:X}\n", table->bctr);
             out += fmt::format("[[switch]]\nbase = 0x{:X}\nr = {}\ndefault = 0x{:X}\nlabels = [\n", table->base, table->r, table->defaultLabel);
             for (auto label : table->labels)
@@ -355,5 +509,78 @@ int main(int argc, char** argv)
     std::ofstream(argv[2]).write(out.data(), out.size());
     fmt::println("bctr: {}, jump tables: {} (word {}, half {}, byte {}), tables with labels outside .text: {}",
         bctrs, found, sizes[4], sizes[2], sizes[1], outside);
+
+    // Neighbouring leaf functions can share tail-merged code: a common default case, or case
+    // bodies that branch into another function's tail. Split the ranges at every branch target
+    // that comes from a different range, repeating until stable. Branches out of a range then
+    // compile to tail calls, and falling off the end of a range continues into the next one.
+    std::map<uint32_t, std::string> splits; // start -> comment
+    for (const auto& fn : leafFunctions)
+        splits.emplace(fn.start, fmt::format("switch at 0x{:X}", fn.bctr));
+
+    auto owner = [&](uint32_t addr) -> const LeafFunction*
+        {
+            // Ranges can overlap before splitting; the closest start wins.
+            const LeafFunction* best = nullptr;
+            for (const auto& fn : leafFunctions)
+                if (addr >= fn.start && addr < fn.end && (best == nullptr || fn.start > best->start))
+                    best = &fn;
+            return best;
+        };
+
+    // A split range ends at the next split point or at the end of the function it was cut from.
+    auto rangeEnd = [&](std::map<uint32_t, std::string>::const_iterator it)
+        {
+            uint32_t end = owner(it->first)->end;
+            if (auto next = std::next(it); next != splits.end())
+                end = std::min(end, next->first);
+            return end;
+        };
+
+    for (bool changed = true; changed;)
+    {
+        changed = false;
+        for (auto it = splits.cbegin(); it != splits.cend(); ++it)
+        {
+            uint32_t start = it->first, end = rangeEnd(it);
+            const auto* fn = owner(start);
+            auto read = [&](uint32_t addr) { return ByteSwap(*(const uint32_t*)(fn->section->data + (addr - fn->section->base))); };
+
+            std::vector<uint32_t> targets;
+            if (fn->bctr >= start && fn->bctr < end)
+            {
+                targets = fn->labels;
+                targets.push_back(fn->defaultLabel);
+            }
+            for (uint32_t addr = start; addr < end; addr += 4)
+            {
+                if (addr + 4 > fn->tableAddr && addr < fn->tableEnd)
+                    continue;
+                if (auto target = BranchTarget(read(addr), addr))
+                    targets.push_back(*target);
+            }
+
+            for (uint32_t target : targets)
+            {
+                if ((target >= start && target < end) || owner(target) == nullptr || splits.count(target))
+                    continue;
+                splits.emplace(target, fmt::format("code shared with range at 0x{:X}", start));
+                changed = true;
+            }
+            if (changed)
+                break;
+        }
+    }
+
+    std::string functions = "functions = [\n";
+    for (auto it = splits.cbegin(); it != splits.cend(); ++it)
+        functions += fmt::format("    {{ address = 0x{:X}, size = 0x{:X} }}, # {}\n", it->first, rangeEnd(it) - it->first, it->second);
+    functions += "]\n";
+    fmt::println("leaf switch functions: {} (from {} switches)", splits.size(), leafFunctions.size());
+    if (argc > 3 && !WriteFunctionsToConfig(argv[3], functions))
+    {
+        fmt::println("error: {} has no BEGIN/END nb_switch_tables functions markers", argv[3]);
+        return EXIT_FAILURE;
+    }
     return EXIT_SUCCESS;
 }

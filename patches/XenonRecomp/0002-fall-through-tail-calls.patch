@@ -1,0 +1,22 @@
+diff --git a/XenonRecomp/recompiler.cpp b/XenonRecomp/recompiler.cpp
+index e6c032a..6da4df6 100644
+--- a/XenonRecomp/recompiler.cpp
++++ b/XenonRecomp/recompiler.cpp
+@@ -2453,6 +2453,17 @@ bool Recompiler::Recompile(const Function& fn)
+         fmt::println("Function at {:X} ends prematurely with instruction {} at {:X}", fn.base, insn.opcode != nullptr ? insn.opcode->name : "INVALID", base - 4);
+ #endif
+ 
++    // A function split out of shared code can fall through into the next one; continue there.
++    if (insn.opcode != nullptr && insn.opcode->id != PPC_INST_B && insn.opcode->id != PPC_INST_BCTR && insn.opcode->id != PPC_INST_BLR)
++    {
++        auto next = image.symbols.find(base);
++        if (next != image.symbols.end() && next->address == base && next->type == Symbol_Function && config.functions.count(fn.base))
++        {
++            println("\t{}(ctx, base);", next->name);
++            println("\treturn;");
++        }
++    }
++
+     println("}}\n");
+ 
+ #ifndef XENON_RECOMP_USE_ALIAS
