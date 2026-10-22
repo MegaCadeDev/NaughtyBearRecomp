@@ -11,10 +11,16 @@ place it in `game/` (the executable at `game/Naughty_Bear/Default.xex`).
 
 ## Status
 
-The whole executable recompiles and builds. The game boots, runs its start menu loop and
-presents frames to a Vulkan window; only the clear color is drawn so far, while the
-renderer port replaces the game's Direct3D library function by function
-(`docs/d3d_map.md`). Audio output and input are not implemented yet.
+The whole executable recompiles and builds. The game boots and renders its title screen
+in a Vulkan window: draws are replayed with the game's shaders (translated by XenosRecomp)
+and textures. Render states, depth, render-to-texture and the buffer-based draws used in
+gameplay are still to do (`docs/d3d_map.md`), as are audio output and input.
+
+To capture the shaders the renderer needs, run once with `NB_DUMP_SHADERS=shaders/dump`,
+then `tools/translate_shaders.sh`, and rebuild.
+
+Debug options: `NB_SCREENSHOT=file.ppm[:frame]` (convert with `tools/ppm2png.py`),
+`NB_DEBUG_DRAWS=frame`, `NB_NO_BLEND=1`, `NB_DEBUG_CLEAR=1`, `NB_LOG_FILES=1`.
 
 ## Building
 

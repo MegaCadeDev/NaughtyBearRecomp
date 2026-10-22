@@ -183,10 +183,30 @@ namespace
     }
 
 
+    // How one vertex element is rewritten into the host layout.
+    enum class ElementConversion
+    {
+        Swap32,        // 32-bit words (floats, D3DCOLOR, packed 8-bit and 10-bit formats)
+        Swap16,        // 16-bit components (normalized shorts, halves)
+        ShortToFloat,  // non-normalized shorts: the GPU fetch yields floats with integer values
+        UbyteToFloat,  // non-normalized bytes, same
+    };
+
+    struct ElementCopy
+    {
+        uint32_t sourceOffset;
+        uint32_t destinationOffset;
+        uint32_t components;   // for the *ToFloat conversions
+        uint32_t sourceBytes;
+        ElementConversion conversion;
+    };
+
     struct VertexDeclaration
     {
         std::vector<RenderInputElement> inputElements;
-        uint32_t swappedTexcoords = 0;
+        // Stream 0 is rewritten into a packed host layout of this stride.
+        std::vector<ElementCopy> copies;
+        uint32_t hostStride = 0;
         uint64_t hash = 0;
     };
 
@@ -243,6 +263,11 @@ namespace
 
     // Texture objects bound per sampler (D3DDevice_SetTexture).
     uint32_t g_samplerTextures[32]{};
+
+    // NB_DEBUG_DRAWS=frame logs every draw of that frame; NB_NO_BLEND=1 draws opaque.
+    const uint64_t g_debugDrawsFrame = [] { const char* v = getenv("NB_DEBUG_DRAWS"); return v ? std::stoull(v) : 0ull; }();
+    const bool g_noBlend = getenv("NB_NO_BLEND") != nullptr;
+    uint64_t g_presentedFrames = 0;
 
     uint64_t g_drawsThisFrame = 0;
     uint64_t g_drawsSkippedThisFrame = 0;
@@ -351,18 +376,42 @@ namespace
             usedLocations.insert(location);
 
             RenderFormat format = ConvertDeclType(type);
+            ElementCopy copy{ offset, declaration.hostStride, 0, 4, ElementConversion::Swap32 };
+            switch (type)
+            {
+            case D3DDECLTYPE_FLOAT2: copy.sourceBytes = 8; break;
+            case D3DDECLTYPE_FLOAT3: copy.sourceBytes = 12; break;
+            case D3DDECLTYPE_FLOAT4: copy.sourceBytes = 16; break;
+            case D3DDECLTYPE_SHORT2N: case D3DDECLTYPE_USHORT2N: case D3DDECLTYPE_FLOAT16_2:
+                copy = { offset, declaration.hostStride, 0, 4, ElementConversion::Swap16 };
+                break;
+            case D3DDECLTYPE_SHORT4N: case D3DDECLTYPE_USHORT4N: case D3DDECLTYPE_FLOAT16_4:
+                copy = { offset, declaration.hostStride, 0, 8, ElementConversion::Swap16 };
+                break;
+            case D3DDECLTYPE_SHORT2:
+                copy = { offset, declaration.hostStride, 2, 4, ElementConversion::ShortToFloat };
+                format = RenderFormat::R32G32_FLOAT;
+                break;
+            case D3DDECLTYPE_SHORT4:
+                copy = { offset, declaration.hostStride, 4, 8, ElementConversion::ShortToFloat };
+                format = RenderFormat::R32G32B32A32_FLOAT;
+                break;
+            case D3DDECLTYPE_UBYTE4: case D3DDECLTYPE_UBYTE4_2:
+                copy = { offset, declaration.hostStride, 4, 4, ElementConversion::UbyteToFloat };
+                format = RenderFormat::R32G32B32A32_FLOAT;
+                break;
+            }
             // Unleashed Recompiled's shaders read float3 normals as raw bits (for R11G11B10 support).
             if ((usage == D3DDECLUSAGE_NORMAL || usage == D3DDECLUSAGE_TANGENT || usage == D3DDECLUSAGE_BINORMAL) && type == D3DDECLTYPE_FLOAT3)
                 format = RenderFormat::R32G32B32_UINT;
-            if (usage == D3DDECLUSAGE_TEXCOORD)
+
+            uint32_t hostBytes = copy.conversion == ElementConversion::ShortToFloat || copy.conversion == ElementConversion::UbyteToFloat
+                ? copy.components * 4 : copy.sourceBytes;
+            if (stream == 0)
             {
-                switch (type)
-                {
-                case D3DDECLTYPE_SHORT2: case D3DDECLTYPE_SHORT4: case D3DDECLTYPE_SHORT2N: case D3DDECLTYPE_SHORT4N:
-                case D3DDECLTYPE_USHORT2N: case D3DDECLTYPE_USHORT4N: case D3DDECLTYPE_FLOAT16_2: case D3DDECLTYPE_FLOAT16_4:
-                    declaration.swappedTexcoords |= 1u << usageIndex;
-                    break;
-                }
+                offset = declaration.hostStride;
+                declaration.copies.push_back(copy);
+                declaration.hostStride += hostBytes;
             }
 
             declaration.inputElements.emplace_back(ConvertDeclUsage(usage), usageIndex, location, format, stream, offset);
@@ -397,7 +446,7 @@ namespace
             if (seen[element.slotIndex])
                 continue;
             seen[element.slotIndex] = true;
-            slots[slotCount++] = RenderInputSlot(element.slotIndex, element.slotIndex == DUMMY_STREAM ? 0 : key.stride);
+            slots[slotCount++] = RenderInputSlot(element.slotIndex, element.slotIndex == DUMMY_STREAM ? 0 : std::max<uint32_t>(declaration.hostStride, 4));
         }
 
         RenderGraphicsPipelineDesc desc;
@@ -410,7 +459,7 @@ namespace
         desc.depthWriteEnabled = false;
         desc.depthClipEnabled = true;
         desc.renderTargetFormat[0] = BACKBUFFER_FORMAT;
-        desc.renderTargetBlend[0] = RenderBlendDesc::AlphaBlend();
+        desc.renderTargetBlend[0] = g_noBlend ? RenderBlendDesc::Copy() : RenderBlendDesc::AlphaBlend();
         desc.renderTargetCount = 1;
         desc.inputElements = declaration.inputElements.data();
         desc.inputElementsCount = uint32_t(declaration.inputElements.size());
@@ -510,6 +559,7 @@ namespace
         static uint64_t presented = 0;
         static auto lastReport = std::chrono::steady_clock::now();
         presented++;
+        g_presentedFrames = presented;
         auto now = std::chrono::steady_clock::now();
         if (now - lastReport >= std::chrono::seconds(2))
         {
@@ -782,14 +832,50 @@ namespace
             shared.textureCubeIndices[i] = NULL_TEXTURE_CUBE;
             shared.samplerIndices[i] = 0;
         }
-        shared.swappedTexcoords = declaration->swappedTexcoords;
+        shared.swappedTexcoords = 0; // vertex data is swapped per element (see VertexDeclaration)
         memcpy(sharedMemory, &shared, sizeof(shared));
 
         PushConstants pushConstants{ g_uploadAddress + vsOffset, g_uploadAddress + psOffset, g_uploadAddress + sharedOffset };
 
         // Vertices (and indices) from guest memory, endian-swapped.
-        uint64_t vertexBytes = uint64_t(vertexCount) * stride;
-        auto [vertexMemory, vertexOffset] = UploadSwapped<uint32_t>(vertexData, vertexBytes);
+        // Vertices are rewritten into the declaration's host layout (see ElementCopy).
+        uint32_t hostStride = std::max<uint32_t>(declaration->hostStride, 4);
+        auto [vertexMemory, vertexOffset] = Allocate(uint64_t(vertexCount) * hostStride);
+        if (vertexMemory != nullptr)
+        {
+            const uint8_t* source = (const uint8_t*)g_memory.Translate(vertexData);
+            for (uint32_t vertex = 0; vertex < vertexCount; vertex++)
+            {
+                const uint8_t* in = source + uint64_t(vertex) * stride;
+                uint8_t* out = vertexMemory + uint64_t(vertex) * hostStride;
+                for (const auto& copy : declaration->copies)
+                {
+                    const uint8_t* from = in + copy.sourceOffset;
+                    uint8_t* to = out + copy.destinationOffset;
+                    switch (copy.conversion)
+                    {
+                    case ElementConversion::Swap32:
+                        for (uint32_t i = 0; i < copy.sourceBytes; i += 4)
+                            *(uint32_t*)(to + i) = ByteSwap(*(const uint32_t*)(from + i));
+                        break;
+                    case ElementConversion::Swap16:
+                        for (uint32_t i = 0; i < copy.sourceBytes; i += 2)
+                            *(uint16_t*)(to + i) = ByteSwap(*(const uint16_t*)(from + i));
+                        break;
+                    case ElementConversion::ShortToFloat:
+                        for (uint32_t i = 0; i < copy.components; i++)
+                            ((float*)to)[i] = float(int16_t(ByteSwap(*(const uint16_t*)(from + i * 2))));
+                        break;
+                    case ElementConversion::UbyteToFloat:
+                        // The GPU reads the word big-endian: X is the least significant byte.
+                        for (uint32_t i = 0; i < 4; i++)
+                            ((float*)to)[i] = float(from[3 - i]);
+                        break;
+                    }
+                }
+            }
+        }
+        uint64_t vertexBytes = uint64_t(vertexCount) * hostStride;
         auto [dummyMemory, dummyOffset] = Allocate(64);
         if (vertexMemory == nullptr || dummyMemory == nullptr)
             return skip("upload buffer full");
@@ -813,13 +899,29 @@ namespace
             }
         }
 
+        if (g_debugDrawsFrame != 0 && g_presentedFrames + 1 == g_debugDrawsFrame)
+        {
+            std::string textures;
+            for (uint32_t i = 0; i < 4; i++)
+            {
+                if (uint32_t object = g_samplerTextures[i])
+                {
+                    uint32_t f1 = Load32(object + TEXTURE_FETCH_CONSTANT + 4), f2 = Load32(object + TEXTURE_FETCH_CONSTANT + 8);
+                    textures += fmt::format(" t{}=fmt{} {}x{} @{:08X}", i, f1 & 0x3F, (f2 & 0x1FFF) + 1, ((f2 >> 13) & 0x1FFF) + 1, f1 & 0xFFFFF000);
+                }
+            }
+            float* v = (float*)vertexMemory;
+            LOGF_IMPL(Utility, "draw", "#{} prim {} verts {} idx {} stride {} vs {:016x} ps {:016x} pos0 ({:.3f}, {:.3f}, {:.3f}, {:.3f}){}",
+                g_drawsThisFrame, primitiveType, vertexCount, indexCount, stride, vsHash, psHash, v[0], v[1], v[2], stride >= 16 ? v[3] : 0.0f, textures);
+        }
+
         g_commandList->setPipeline(pipeline);
         g_commandList->setGraphicsPushConstants(0, &pushConstants, 0, sizeof(pushConstants));
         RenderVertexBufferView views[] = {
             RenderVertexBufferView(g_uploadBuffer->at(vertexOffset), uint32_t(vertexBytes)),
             RenderVertexBufferView(g_uploadBuffer->at(dummyOffset), 64),
         };
-        RenderInputSlot slots[] = { RenderInputSlot(0, stride), RenderInputSlot(DUMMY_STREAM, 0) };
+        RenderInputSlot slots[] = { RenderInputSlot(0, hostStride), RenderInputSlot(DUMMY_STREAM, 0) };
         g_commandList->setVertexBuffers(0, &views[0], 1, &slots[0]);
         g_commandList->setVertexBuffers(DUMMY_STREAM, &views[1], 1, &slots[1]);
 
@@ -1024,8 +1126,11 @@ PPC_FUNC(sub_82F26FA0)
 // D3DDevice_BeginTiling(dev, Flags, Count, pTileRects, pClearColor, ClearZ, ClearStencil).
 PPC_FUNC(sub_82F37138)
 {
+    static const bool debugClear = getenv("NB_DEBUG_CLEAR") != nullptr;
     if (uint32_t color = ctx.r7.u32)
         g_clearColor = RenderColor(LoadFloat(color), LoadFloat(color + 4), LoadFloat(color + 8), LoadFloat(color + 12));
+    if (debugClear)
+        g_clearColor = RenderColor(1.0f, 0.0f, 1.0f, 1.0f);
     {
         std::lock_guard lock(g_videoMutex);
         if (g_inFrame)
