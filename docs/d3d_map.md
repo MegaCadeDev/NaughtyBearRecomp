@@ -1,15 +1,19 @@
-# Naughty Bear's Direct3D library
+# Naughty Bear's Direct3D library and the renderer
 
-Naughty Bear links the Xbox 360 XDK Direct3D library statically. The renderer port
-follows Unleashed Recompiled: the public D3D functions are replaced with host
-implementations by address, so each one has to be found in this executable.
+Naughty Bear links the Xbox 360 XDK Direct3D library statically. Unlike Unleashed
+Recompiled, which replaces Sonic's Direct3D outright, this port lets the game's Direct3D
+run (against the headless GPU, `src/gpu/headless.cpp`) and mirrors what it does: a few
+functions are hooked by address (draws, tiling, resolves, swap, shader creation), and at
+each draw the renderer reads the GPU state the device keeps (register images, fetch
+constants, bound surfaces) and replays the draw with Vulkan. This page lists what was
+found in the executable and how the renderer (`src/gpu/video.cpp`) uses it.
 
 ## Extent
 
 All PM4 packet construction lives in `0x82F20000-0x82F50000`; that range is the D3D
 library (Sonic Unleashed's is at `0x82BD9000-0x82C01000`). The game's own renderer
 layer calls into it from relatively few places (at most 38 call sites per function),
-so the number of hooks needed should be manageable.
+so the number of hooks needed is manageable.
 
 ## Identified
 
@@ -52,43 +56,94 @@ Confidence: **high** = arguments match exactly; **likely** = consistent but unve
 | `0x82F29F00` | `D3DDevice_SetViewport` | likely | (dev, pViewport); called right after BeginTiling |
 | `0x82F2C3E0` | `D3DDevice_CreateRenderTarget` | likely | (1296, 736, D3DFORMAT 0x1A220197 / 0x18280186, ...) |
 | `0x82F2C2C0` | `D3DDevice_CreateTexture` | likely | (1280, 720, Levels 1, Usage 1, 0, D3DFORMAT 0x28280106, ...) |
+| `0x82F29778` | `D3DDevice_SetStreamSource` | high | (dev, Stream, pVertexBuffer, Offset, Stride, dirty bit): writes vertex fetch constant 95 - Stream, keeps the buffer at device+12636+4n and stride / 4 at device+12704+n |
+| `0x82F29898` | `D3DDevice_SetIndices` | high | (dev, pIndexBuffer): kept at device+12612 |
+| `0x82F29630` | `D3DDevice_SetScissorRect` | high | (dev, pRect): writes the scissor into register images 0x2011/0x2012 |
+| `0x82F398F0` | `D3DDevice_Resolve` | high | (dev, Flags, pSourceRect, pDestTexture, pDestPoint, DestLevel, DestSliceOrFace, pClearColor, ClearZ, ClearStencil, pParameters) |
+| `0x82F36FC8` | `D3DDevice_SetPredication` | high | (dev, Mask): writes PM4 `SET_BIN_SELECT`; used with tiling, not a clear |
+| `0x82F37EE0` | `D3DDevice_EndVertices` | high | ends a BeginVertices / BeginIndexedVertices draw |
+| `0x82F47D40` | register flush (internal) | high | (dev, dirty bits, first register, device source): writes one register per set bit from consecutive device dwords |
 | `0x82F27368`-`0x82F28BF8` | render state setters | high | called through the device's render state table; r6 = the setter, r7 = its table slot |
 | `0x82F28C08`, `0x82F28DB0`, `0x82F28F50`, `0x82F29380`, `0x82F293D0`, ... | sampler state setters | likely | (dev, Sampler, Value) |
 
-No `SetStreamSource` or `SetIndices` calls appear in traced frames; in this XDK they are
-probably inline writes to the device's fetch constants, read back at draw time.
-
-Still to identify: `Clear` (if used outside tiling), `SetScissorRect`, the vertex/index
-buffer and texture create/lock functions (`0x82F2C048`, `0x82F2C518`, `0x82F29728`,
-`0x82F22C20` are candidates), and where the stream/index fetch state lives.
+Not hooked yet: whatever builds the vertex shader objects used by a few depth-only draws
+(they don't pass through the constructors above, so their shaders are unknown).
 
 ## Device layout
 
 The device is **0x5F00 bytes**, 0x100 more than Unleashed Recompiled's `GuestDevice`
-(0x5E00), so this XDK version's layout differs and each field Unleashed reads has to be
-located again. Found so far (offsets from the device):
+(0x5E00), so its fields had to be located again. The device keeps the GPU registers it
+programs as images, one dword per register, which the draw functions flush to the command
+buffer by dirty bits (`0x82F47D40`); the renderer reads them directly.
 
 | Offset | Field |
 |-|-|
 | `0x00`-`0x27` | dirty flags: five 64-bit words, flushed at the start of every draw |
 | `0x28`-`0x188` | render state setter table, 89 entries (Unleashed's has 101 at `0x40`) |
+| `0x0480`-`0x077F` | fetch constants, 32 slots of 6 dwords (GPU registers 0x4800+): texture slots 0-15, vertex streams use vertex fetch constant 95 - n |
 | `0x0780`-`0x177F` | vertex shader float constants (256 float4), uploaded to ALU constant 0x4000 |
 | `0x1780`-`0x277F` | pixel shader float constants (256 float4), uploaded to ALU constant 0x4400 |
+| `10112` | boolean constants (registers 0x4900+): vertex shader bools, pixel shader bools at +16 |
+| `10368` | register image 0x2000-0x2012 (`RB_SURFACE_INFO`, `RB_COLOR_INFO`, `RB_DEPTH_INFO`, ..., scissor at 0x2011/0x2012) |
+| `10444` | register image 0x2100-0x2114 (`RB_COLOR_MASK`, stencil reference, `RB_ALPHA_REF`, `PA_CL_VPORT_*`) |
+| `10528` | register image 0x2180-0x2184 |
+| `10548` | register image 0x2200-0x220B (`RB_DEPTHCONTROL`, `RB_BLENDCONTROL0-3`, `RB_COLORCONTROL`, `PA_SU_SC_MODE_CNTL`, `PA_CL_VTE_CNTL`) |
+| `10596`, `10680` | register images 0x2280-0x2294, 0x2300-0x2325 |
 | `0x2A90` | pointer to the GPU-written completed fence |
 | `0x2A9C` | current fence |
+| `0x2ED8` | current vertex declaration (element count at +24, 12-byte `D3DVERTEXELEMENT9` from +52) |
+| `0x3244` / `0x3248` | current pixel / vertex shader |
+| `12612` | current index buffer |
+| `12616`-`12628`, `12632` | render targets 0-3, depth/stencil surface |
+| `12636` + 4n, `12704` + n | vertex buffer and stride / 4 of stream n |
+| `12824` | viewport (`X, Y, Width, Height, MinZ, MaxZ` as floats) |
 | `0x35A4` / `0x35A8` | command buffer write pointer / limit |
-| `0x3244` | current pixel shader |
-| `0x3248` | current vertex shader |
 | `0x5E80` | BehaviorFlags from CreateDevice |
+
+Objects: surfaces keep their `RB_SURFACE_INFO` image (EDRAM pitch) at +24, their
+`RB_COLOR_INFO`/`RB_DEPTH_INFO` at +28 and their EDRAM size at +44; textures their fetch
+constant at +0x1C; vertex and index buffers their address at +24 (index buffers flag
+32-bit indices in the sign bit of their first dword).
+
+## The renderer
+
+At each draw `src/gpu/video.cpp`:
+
+- looks up the bound shaders (by the hash recorded when they were created) in the
+  translated shader cache;
+- binds host render targets for the device's surfaces: every guest surface gets a host
+  texture, sized from its EDRAM pitch and size; depth/stencil is `D32_FLOAT_S8_UINT`;
+- builds the pipeline state from the register images: blend (`RB_BLENDCONTROL0`), colour
+  mask, depth and stencil (`RB_DEPTHCONTROL`, `RB_STENCILREFMASK`), alpha test
+  (`RB_COLORCONTROL`, a specialization constant in the translated shaders), viewport
+  (`PA_CL_VPORT_*`, keeping the reversed depth range the game uses), scissor;
+- decodes the vertex streams named by the vertex declaration from their fetch constants:
+  every element, of any `D3DDECLTYPE`, becomes a float4 (or uint4 for blend indices and
+  the normal-type inputs, which XenosRecomp reads as raw bits); converted buffers are
+  cached by content, and small streams (bone palettes) are decoded per draw. Each input
+  location's stream is also passed to the shaders by address, for vertex fetches indexed
+  by a computed register (skinning palettes, particles);
+- converts strips, fans and quads to triangle lists on the CPU (honouring strip restarts);
+- reads textures from their fetch constants (untiling and byte-swapping them), and their
+  samplers' clamp and filter modes.
+
+Draws come from `DrawVertices`, `DrawIndexedVertices` and the `Begin(Indexed)Vertices` /
+`EndVertices` pair (which `DrawVerticesUP` and `DrawIndexedVerticesUP` use too); particle
+systems call the latter directly.
+
+The game renders with predicated tiling: `BeginTiling` clears the targets, `EndTiling`
+and `Resolve` copy a surface into a texture. Resolves copy into a host texture that stands
+in for the destination guest texture (by its physical address) when it is sampled later;
+depth resolves become a float texture. `Swap` presents the resolved front buffer: it's
+copied to a 1280x720 target and on to the swap chain. The copies use small GLSL shaders
+(`src/gpu/shaders/`), compiled at build time.
 
 ## Runtime tracing
 
 Configure with `-DNB_TRACE_D3D=ON` to wrap every function in `0x82F1C000-0x82F50000`
 (`tools/gen_trace_wrappers.py`): calls from game code are logged with r3-r8 and f1, and
 call counts are reported every 5 seconds. `NB_TRACE_FRAME=N` logs every call of frame N
-(frames end at Swap). Tracing also enables the headless GPU
-(`src/gpu/headless.cpp`), which completes fences, mirrors the ring buffer read pointer and
-raises a 60 Hz vblank so the game runs its render loop without a GPU.
+(frames end at Swap).
 
 ## Method
 

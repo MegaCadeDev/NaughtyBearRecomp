@@ -1,10 +1,9 @@
-// Headless GPU: lets the game's own Direct3D library run without a GPU, for analysis.
+// Headless GPU: lets the game's own Direct3D library run without a GPU.
 //
 // Direct3D blocks on fences the GPU writes back, on the ring buffer read pointer, and on
 // vertical blank interrupts. With no GPU, those never move. This stand-in makes all
 // submitted work look complete at once and raises a vertical blank at 60 Hz. Nothing is
-// drawn; it exists so the game gets far enough to trace its Direct3D calls. The real
-// renderer will replace the Direct3D library instead (see docs/d3d_map.md).
+// drawn here: the renderer mirrors the draws (src/gpu/video.cpp, docs/d3d_map.md).
 
 #include <stdafx.h>
 #include <cpu/guest_thread.h>
