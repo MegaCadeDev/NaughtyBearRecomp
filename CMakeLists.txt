@@ -37,6 +37,12 @@ add_custom_command(
     DEPENDS ${CMAKE_SOURCE_DIR}/tools/gen_import_stubs.py ${GENERATED_DIR}/ppc_func_mapping.cpp ${RUNTIME_SOURCES}
     COMMENT "Generating import stubs")
 
+find_package(SDL2 REQUIRED)
+
+# plume: the renderer abstraction Unleashed Recompiled uses, here on Vulkan through SDL.
+set(SDL_VULKAN_ENABLED ON CACHE BOOL "" FORCE)
+add_subdirectory(thirdparty/plume EXCLUDE_FROM_ALL)
+
 add_library(o1heap STATIC thirdparty/o1heap/o1heap.c)
 target_include_directories(o1heap PUBLIC thirdparty/o1heap)
 
@@ -62,4 +68,4 @@ target_include_directories(NaughtyBear PRIVATE
     thirdparty/unordered_dense/include
     tools/XenonRecomp/thirdparty/xxHash)
 target_precompile_headers(NaughtyBear PRIVATE src/stdafx.h)
-target_link_libraries(NaughtyBear PRIVATE NaughtyBearRecompLib XenonUtils o1heap fmt::fmt xxHash::xxhash)
+target_link_libraries(NaughtyBear PRIVATE NaughtyBearRecompLib XenonUtils o1heap fmt::fmt xxHash::xxhash plume SDL2::SDL2)

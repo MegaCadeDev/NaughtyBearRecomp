@@ -11,13 +11,15 @@ place it in `game/` (the executable at `game/Naughty_Bear/Default.xex`).
 
 ## Status
 
-The whole executable recompiles and builds. The game boots through its C runtime,
-memory, file system, threads and networking setup, and stops when Direct3D waits for
-the GPU: graphics, audio output and input are not implemented yet.
+The whole executable recompiles and builds. The game boots, runs its start menu loop and
+presents frames to a Vulkan window; only the clear color is drawn so far, while the
+renderer port replaces the game's Direct3D library function by function
+(`docs/d3d_map.md`). Audio output and input are not implemented yet.
 
 ## Building
 
-Requires Clang 18+, CMake 3.20+ and Ninja.
+Requires Clang 18+, CMake 3.20+, Ninja, SDL2 and Vulkan
+(`sudo apt install libsdl2-dev libvulkan-dev`).
 
 ```bash
 git submodule update --init --recursive

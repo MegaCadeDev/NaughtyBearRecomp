@@ -6,8 +6,6 @@
 #include <os/logger.h>
 #include <map>
 
-void HeadlessGpuOnDeviceCreated(uint32_t device);
-
 namespace
 {
     constexpr uint32_t CREATE_DEVICE = 0x82F26FA0;
@@ -87,7 +85,6 @@ void nb::trace::Leave(uint32_t function, const PPCContext& ctx)
     {
         uint32_t device = ByteSwap(*(uint32_t*)g_memory.Translate(g_createDeviceOut));
         LOGF_IMPL(Utility, "d3d", "device created at 0x{:08X}", device);
-        HeadlessGpuOnDeviceCreated(device);
     }
 }
 

@@ -21,11 +21,14 @@ Files taken from it, with the changes made for Naughty Bear:
 
 Files written for this project: `src/kernel/virtual_memory.cpp`, `src/kernel/io/nt_file.cpp`,
 `src/kernel/xnet.cpp`, `src/kernel/crt_format.cpp`, `src/kernel/xex_modules.*`,
-`src/apu/driver/null_driver.cpp`, `src/user/*`, `src/import_stub.*`.
+`src/apu/driver/null_driver.cpp`, `src/user/*`, `src/import_stub.*`, `src/gpu/*`.
 
 ## Third-party code
 
 - [XenonRecomp](https://github.com/hedge-dev/XenonRecomp) (MIT), used as a submodule with the patches in `patches/XenonRecomp/`.
 - [o1heap](https://github.com/pavel-kirienko/o1heap) (MIT), in `thirdparty/o1heap`, copied from Unleashed Recompiled.
 - [unordered_dense](https://github.com/martinus/unordered_dense) (MIT), submodule.
+- [XenosRecomp](https://github.com/hedge-dev/XenosRecomp) (MIT), submodule, with the patches in `patches/XenosRecomp/`.
+- [plume](https://github.com/renderbag/plume) (MIT), submodule, the renderer abstraction Unleashed Recompiled uses.
+- [SDL2](https://www.libsdl.org/) (zlib), from the system.
 - Behaviour of several instructions and kernel functions follows [Xenia](https://github.com/xenia-project/xenia) (BSD-3-Clause); no Xenia code is included.

@@ -4,6 +4,7 @@
 #include <stdafx.h>
 #include <apu/audio.h>
 #include <cpu/guest_thread.h>
+#include <gpu/video.h>
 #include <kernel/function.h>
 #include <kernel/heap.h>
 #include <kernel/memory.h>
@@ -134,7 +135,37 @@ int main(int argc, char** argv)
         return EXIT_FAILURE;
     }
 
-    GuestThread::Start({ entry, 0, 0 });
-    LOGN("Entry point returned.");
-    return EXIT_SUCCESS;
+    // SDL wants its window and events on the main thread, so the game gets its own.
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0)
+    {
+        LOGFN_ERROR("SDL_Init failed: {}", SDL_GetError());
+        return EXIT_FAILURE;
+    }
+    SDL_Window* window = SDL_CreateWindow("Naughty Bear", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720,
+        SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+    if (window == nullptr || !Video::Init(window))
+    {
+        LOGFN_ERROR("Could not create the game window: {}", SDL_GetError());
+        return EXIT_FAILURE;
+    }
+
+    std::thread game([entry]
+        {
+            GuestThread::Start({ entry, 0, 0 });
+            LOGN("Entry point returned.");
+            SDL_Event quit{ SDL_QUIT };
+            SDL_PushEvent(&quit);
+        });
+    game.detach();
+
+    for (SDL_Event event; SDL_WaitEvent(&event);)
+    {
+        if (event.type == SDL_QUIT)
+            break;
+        if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
+            Video::OnWindowResized();
+    }
+
+    // The game has no orderly shutdown path yet.
+    _exit(EXIT_SUCCESS);
 }
