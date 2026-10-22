@@ -1,0 +1,14 @@
+# Game data — never commit copyrighted files
+game/*
+!game/README.md
+*.xex
+*.iso
+*.xbe
+*.bin
+
+# Generated recompiler output
+generated/
+
+# Build output
+build/
+out/

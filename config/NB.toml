@@ -1,0 +1,35 @@
+# XenonRecomp configuration for Naughty Bear (Xbox 360).
+# Paths are relative to this file.
+
+[main]
+file_path = "../game/Naughty_Bear/Default.xex"
+out_directory_path = "../generated/ppc"
+switch_table_file_path = "NB_switch_tables.toml"
+
+# Leave optimizations off until the recompilation runs correctly.
+skip_lr = false
+skip_msr = false
+ctr_as_local = false
+xer_as_local = false
+reserved_as_local = false
+cr_as_local = false
+non_argument_as_local = false
+non_volatile_as_local = false
+
+# Register save/restore helpers (found by the byte patterns in XenonRecomp's README).
+restgprlr_14_address = 0x8308CC10
+savegprlr_14_address = 0x8308CBC0
+restfpr_14_address = 0x8308E9DC
+savefpr_14_address = 0x8308E990
+restvmx_14_address = 0x83090328
+savevmx_14_address = 0x83090090
+restvmx_64_address = 0x830903BC
+savevmx_64_address = 0x83090124
+
+# Found via the RtlUnwind call inside longjmp; setjmp follows it.
+longjmp_address = 0x830968F0
+setjmp_address = 0x83096C10
+
+invalid_instructions = [
+    { data = 0x00000000, size = 4 }, # Padding
+]
