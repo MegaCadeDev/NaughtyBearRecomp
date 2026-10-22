@@ -12,13 +12,17 @@ place it in `game/` (the executable at `game/Naughty_Bear/Default.xex`).
 ## Status
 
 The whole executable recompiles and builds. The game boots, renders its title screen
-and menus in a Vulkan window, and takes controller and keyboard input: draws are replayed with the game's shaders (translated by XenosRecomp)
-and textures. Render states, depth, render-to-texture and the buffer-based draws used in
-gameplay are still to do (`docs/d3d_map.md`), as is audio output. Saves are kept in
-`save/` (one folder per save container) and persist between runs.
+and menus in a Vulkan window, takes controller and keyboard input, saves, and loads
+into levels: draws are replayed with the game's shaders (translated by XenosRecomp)
+and textures. In levels only the HUD and 2D elements show so far: render states, depth,
+render-to-texture and the buffer-based draws the 3D world uses are still to do
+(`docs/d3d_map.md`), as is audio output. Saves are kept in `save/` (one folder per save
+container) and persist between runs.
 
-To capture the shaders the renderer needs, run once with `NB_DUMP_SHADERS=shaders/dump`,
-then `tools/translate_shaders.sh`, and rebuild.
+Shaders the game creates are written to `shaders/dump/` while it runs (or to
+`NB_DUMP_SHADERS=dir`). Playing through new areas collects their shaders; then run
+`tools/translate_shaders.sh` and rebuild to add them to the cache. Draws whose shader is
+not in the cache yet are skipped.
 
 Debug options: `NB_SCREENSHOT=file.ppm[:frame]` (convert with `tools/ppm2png.py`),
 `NB_DEBUG_DRAWS=frame`, `NB_NO_BLEND=1`, `NB_DEBUG_CLEAR=1`, `NB_LOG_FILES=1`.

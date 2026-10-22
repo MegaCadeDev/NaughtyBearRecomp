@@ -1,0 +1,38 @@
+--- a/XenonRecomp/recompiler.cpp
++++ b/XenonRecomp/recompiler.cpp
+@@ -1454,7 +1454,7 @@
+         break;
+ 
+     case PPC_INST_MFTB:
+-        println("\t{}.u64 = __rdtsc();", r(insn.operands[0]));
++        println("\t{}.u64 = __mftb();", r(insn.operands[0]));
+         break;
+ 
+     case PPC_INST_MR:
+--- a/XenonUtils/ppc_context.h
++++ b/XenonUtils/ppc_context.h
+@@ -5,6 +5,7 @@
+ #error "ppc_config.h must be included before ppc_context.h"
+ #endif
+ 
++#include <chrono>
+ #include <climits>
+ #include <cmath>
+ #include <csetjmp>
+@@ -689,6 +690,16 @@
+     return simde_mm_castps_si128(simde_mm_insert_ps(simde_mm_castsi128_ps(simde_mm_srl_epi64(a, b)), simde_mm_castsi128_ps(simde_mm_srl_epi64(simde_mm_srli_si128(a, 4), b)), 0x10));
+ }
+ 
++// The Xenon timebase ticks at 49.875 MHz (the rate KeQueryPerformanceFrequency reports),
++// so derive it from the host clock rather than the host's cycle counter.
++inline uint64_t __mftb()
++{
++    constexpr uint64_t TIMEBASE_HZ = 49875000;
++    const uint64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
++        std::chrono::steady_clock::now().time_since_epoch()).count();
++    return (ns / 1000000000) * TIMEBASE_HZ + (ns % 1000000000) * TIMEBASE_HZ / 1000000000;
++}
++
+ #if defined(__aarch64__) || defined(_M_ARM64)
+ inline uint64_t __rdtsc()
+ {

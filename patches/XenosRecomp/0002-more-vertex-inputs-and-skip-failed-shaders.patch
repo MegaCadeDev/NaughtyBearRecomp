@@ -1,0 +1,76 @@
+--- a/XenosRecomp/main.cpp
++++ b/XenosRecomp/main.cpp
+@@ -141,7 +141,13 @@
+ #endif
+ 
+                 IDxcBlob* spirv = dxcCompiler.compile(recompiler.out, recompiler.isPixelShader, false, true);
+-                assert(spirv != nullptr);
++                if (spirv == nullptr)
++                {
++                    // Leave the shader out of the cache rather than failing the whole run.
++                    fmt::println("Shader {:016x} failed to compile; skipping it", hashShaderPair.first);
++                    ++progress;
++                    return;
++                }
+ 
+                 bool result = smolv::Encode(spirv->GetBufferPointer(), spirv->GetBufferSize(), shader.spirv, smolv::kEncodeFlagStripDebugInfo);
+                 assert(result);
+@@ -164,6 +170,9 @@
+ 
+         for (auto& [hash, shader] : shaders)
+         {
++            if (shader.spirv.empty())
++                continue;
++
+             f.println("\t{{ 0x{:X}, {}, {}, {}, {}, {} }},",
+                 hash, dxil.size(), (shader.dxil != nullptr) ? shader.dxil->GetBufferSize() : 0, spirv.size(), shader.spirv.size(), shader.specConstantsMask);
+ 
+--- a/XenosRecomp/shader_recompiler.cpp
++++ b/XenosRecomp/shader_recompiler.cpp
+@@ -1,6 +1,8 @@
+ #include "shader_recompiler.h"
+ #include "shader_common.h"
+ 
++#include <set>
++
+ static constexpr char SWIZZLES[] = 
+ { 
+     'x',
+@@ -99,6 +101,14 @@
+     { DeclUsage::BlendWeight, 1, 16 },
+     { DeclUsage::BlendWeight, 2, 17 },
+     { DeclUsage::BlendWeight, 3, 18 },
++    { DeclUsage::BlendIndices, 1, 19 },
++    { DeclUsage::BlendIndices, 2, 20 },
++    { DeclUsage::BlendIndices, 3, 21 },
++    { DeclUsage::Normal, 1, 22 },
++    { DeclUsage::Tangent, 1, 23 },
++    { DeclUsage::Binormal, 1, 24 },
++    { DeclUsage::Color, 2, 25 },
++    { DeclUsage::Color, 3, 26 },
+ };
+ 
+ static constexpr std::pair<DeclUsage, size_t> INTERPOLATORS[] =
+@@ -1313,6 +1323,7 @@
+     else
+     {
+         auto vertexShader = reinterpret_cast<const VertexShader*>(shader);
++        std::set<std::pair<uint32_t, uint32_t>> declaredInputs;
+         for (uint32_t i = 0; i < vertexShader->vertexElementCount; i++)
+         {
+             union
+@@ -1325,6 +1336,14 @@
+ 
+             const char* usageType = USAGE_TYPES[uint32_t(vertexElement.usage)];
+ 
++            // A shader can fetch the same element more than once (at different addresses);
++            // declare the input once and map every fetch to it.
++            if (!declaredInputs.emplace(uint32_t(vertexElement.usage), uint32_t(vertexElement.usageIndex)).second)
++            {
++                vertexElements.emplace(uint32_t(vertexElement.address), vertexElement);
++                continue;
++            }
++
+         #ifdef UNLEASHED_RECOMP
+             if ((vertexElement.usage == DeclUsage::TexCoord && vertexElement.usageIndex == 2 && isMetaInstancer) ||
+                 (vertexElement.usage == DeclUsage::Position && vertexElement.usageIndex == 1))

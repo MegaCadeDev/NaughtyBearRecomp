@@ -40,6 +40,10 @@ GuestThreadContext::~GuestThreadContext()
     g_userHeap.Free(thread);
 }
 
+// The APC queue of the current guest thread (threads not created through a handle, like the
+// main thread, get one that nothing can queue to).
+static thread_local GuestApcQueue* g_currentApcQueue;
+
 #ifdef USE_PTHREAD
 static size_t GetStackSize()
 {
@@ -72,6 +76,7 @@ static void GuestThreadFunc(GuestThreadHandle* hThread)
 {
 #endif
     hThread->suspended.wait(true);
+    g_currentApcQueue = &hThread->apcQueue;
     GuestThread::Start(hThread->params);
     hThread->finished = true;
     hThread->finished.notify_all();
@@ -182,6 +187,73 @@ GuestThreadHandle* GuestThread::Start(const GuestThreadParams& params, uint32_t*
     }
 
     return hThread;
+}
+
+void GuestThread::QueueApc(GuestThreadHandle* hThread, const GuestApc& apc)
+{
+    std::lock_guard lock(hThread->apcQueue.mutex);
+    hThread->apcQueue.apcs.push_back(apc);
+    hThread->apcQueue.pending = true;
+}
+
+bool GuestThread::DeliverApcs()
+{
+    auto* queue = g_currentApcQueue;
+    if (queue == nullptr || !queue->pending)
+        return false;
+
+    bool delivered = false;
+    while (true)
+    {
+        GuestApc apc;
+        {
+            std::lock_guard lock(queue->mutex);
+            if (queue->apcs.empty())
+            {
+                queue->pending = false;
+                break;
+            }
+            apc = queue->apcs.front();
+            queue->apcs.pop_front();
+        }
+
+        GuestToHostFunction<void>(apc.routine, apc.context, apc.arg1, apc.arg2);
+        delivered = true;
+    }
+
+    return delivered;
+}
+
+uint32_t GuestThread::AlertableWait(uint32_t timeout, const std::function<uint32_t(uint32_t)>& wait)
+{
+    constexpr uint32_t SLICE_MS = 2;
+
+    if (DeliverApcs())
+        return STATUS_USER_APC;
+
+    if (g_currentApcQueue == nullptr || timeout == 0)
+        return wait(timeout);
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout);
+    while (true)
+    {
+        uint32_t slice = SLICE_MS;
+        if (timeout != INFINITE)
+        {
+            auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+            slice = uint32_t(std::clamp<int64_t>(remaining, 0, SLICE_MS));
+        }
+
+        uint32_t status = wait(slice);
+        if (status != STATUS_TIMEOUT)
+            return status;
+
+        if (DeliverApcs())
+            return STATUS_USER_APC;
+
+        if (timeout != INFINITE && std::chrono::steady_clock::now() >= deadline)
+            return STATUS_TIMEOUT;
+    }
 }
 
 uint32_t GuestThread::GetCurrentThreadId()

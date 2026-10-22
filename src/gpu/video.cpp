@@ -121,8 +121,8 @@ namespace
         D3DDECLTYPE_FLOAT16_2 = 0x2C235F, D3DDECLTYPE_FLOAT16_4 = 0x1A2360, D3DDECLTYPE_UNUSED = 0xFFFFFFFF,
     };
 
-    // Vertex input locations; must match patches/XenosRecomp (Unleashed's table plus
-    // BLENDWEIGHT1-3, which Naughty Bear uses).
+    // Vertex input locations; must match patches/XenosRecomp (Unleashed's table plus the
+    // extra blend, normal and colour channels Naughty Bear uses).
     struct Location
     {
         uint32_t usage;
@@ -138,6 +138,9 @@ namespace
         { D3DDECLUSAGE_TEXCOORD, 4, 12 }, { D3DDECLUSAGE_TEXCOORD, 5, 13 }, { D3DDECLUSAGE_TEXCOORD, 6, 14 }, { D3DDECLUSAGE_TEXCOORD, 7, 15 },
         { D3DDECLUSAGE_POSITION, 1, 15 },
         { D3DDECLUSAGE_BLENDWEIGHT, 1, 16 }, { D3DDECLUSAGE_BLENDWEIGHT, 2, 17 }, { D3DDECLUSAGE_BLENDWEIGHT, 3, 18 },
+        { D3DDECLUSAGE_BLENDINDICES, 1, 19 }, { D3DDECLUSAGE_BLENDINDICES, 2, 20 }, { D3DDECLUSAGE_BLENDINDICES, 3, 21 },
+        { D3DDECLUSAGE_NORMAL, 1, 22 }, { D3DDECLUSAGE_TANGENT, 1, 23 }, { D3DDECLUSAGE_BINORMAL, 1, 24 },
+        { D3DDECLUSAGE_COLOR, 2, 25 }, { D3DDECLUSAGE_COLOR, 3, 26 },
     };
 
     // Inputs a shader may declare without the declaration providing them read zeroes from
@@ -1065,9 +1068,15 @@ namespace
         return XXH3_64bits(g_memory.Translate(container), size);
     }
 
-    // NB_DUMP_SHADERS=dir writes every shader container the game creates to dir, for
-    // tools/translate_shaders.sh.
-    const char* g_shaderDumpDir = getenv("NB_DUMP_SHADERS");
+    // Shader containers the game creates are written to NB_DUMP_SHADERS (default: shaders/dump
+    // when that folder exists), for tools/translate_shaders.sh.
+    const char* g_shaderDumpDir = []() -> const char*
+    {
+        if (const char* dir = getenv("NB_DUMP_SHADERS"))
+            return dir;
+        std::error_code ec;
+        return std::filesystem::is_directory("shaders/dump", ec) ? "shaders/dump" : nullptr;
+    }();
 
     void DumpShader(uint32_t container, uint64_t hash, bool pixel)
     {

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Translate the shaders dumped from the game (NB_DUMP_SHADERS=shaders/dump with a
-# -DNB_TRACE_D3D=ON build) into a SPIR-V shader cache with XenosRecomp.
+# Translate the shaders dumped from the game (shaders/dump, written while it runs) into a
+# SPIR-V shader cache with XenosRecomp.
 # Set XENOS_DUMP_HLSL=<dir> to also keep the intermediate HLSL.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"

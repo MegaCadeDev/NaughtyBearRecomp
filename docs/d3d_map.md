@@ -104,18 +104,23 @@ and argument shapes matching the XDK API.
 ## Shaders
 
 The game's data is in compressed `.lu` packages (`lu/*.lu`, signature `x36`), so shaders
-are captured at runtime instead: with a tracing build, `NB_DUMP_SHADERS=shaders/dump`
-writes every shader container passed to the vertex/pixel shader constructors
-(`0x82F30050`, `0x82F2FF28`). They are standard XDK containers (magic `0x102A1100`;
-the microcode follows the virtual part, `virtualSize + physicalSize` bytes in all).
+are captured at runtime instead: every shader container the game creates (through the
+vertex/pixel shader constructors `0x82F30050`/`0x82F2FF28` or `CreateVertexShader`/
+`CreatePixelShader` at `0x82F30188`/`0x82F2FF60`) is written to `shaders/dump/` when that
+folder exists, or to `NB_DUMP_SHADERS=dir`. They are standard XDK containers (magic
+`0x102A1100`; the microcode follows the virtual part, `virtualSize + physicalSize` bytes
+in all).
 
-`tools/translate_shaders.sh` runs XenosRecomp over the dump. Two patches
-(`patches/XenosRecomp/`) were needed:
+`tools/translate_shaders.sh` runs XenosRecomp over the dump. Patches
+(`patches/XenosRecomp/`) needed for Naughty Bear:
 
-- Vertex input locations 16-18 for `BLENDWEIGHT1`-`3`, which Naughty Bear uses as extra
-  vertex data and Sonic Unleashed does not.
+- Extra vertex input locations: 16-18 for `BLENDWEIGHT1`-`3`, 19-21 for
+  `BLENDINDICES1`-`3`, 22-24 for the second normal/tangent/binormal and 25-26 for
+  `COLOR2`-`3` (the runtime's table in `src/gpu/video.cpp` must match).
+- Inputs a shader fetches more than once are declared once.
 - Boolean constant arrays, with pixel shader boolean registers addressed from 128.
+- A shader that fails to compile is reported and left out instead of aborting.
 
-All 29 shaders seen on the start menu translate to SPIR-V. Shaders only appear once
-the game constructs them, so the dump grows as more of the game is played; decoding the
-`.lu` packages would capture them all up front.
+The 368 shaders seen through the menus and the start of episode 1 all translate to
+SPIR-V. Shaders only appear once the game constructs them, so the dump grows as more of
+the game is played; decoding the `.lu` packages would capture them all up front.

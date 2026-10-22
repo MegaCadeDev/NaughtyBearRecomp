@@ -430,7 +430,11 @@ uint32_t NtWaitForSingleObjectEx(uint32_t Handle, uint32_t WaitMode, uint32_t Al
 
     if (IsKernelObject(Handle))
     {
-        return GetKernelObject(Handle)->Wait(timeout);
+        auto* object = GetKernelObject(Handle);
+        if (Alertable)
+            return GuestThread::AlertableWait(timeout, [object](uint32_t ms) { return object->Wait(ms); });
+
+        return object->Wait(timeout);
     }
     else
     {
@@ -605,11 +609,17 @@ uint32_t RtlUnicodeToMultiByteN(char* MultiByteString, uint32_t MaxBytesInMultiB
 
 uint32_t KeDelayExecutionThread(uint32_t WaitMode, bool Alertable, be<int64_t>* Timeout)
 {
-    // We don't do async file reads.
-    if (Alertable)
-        return STATUS_USER_APC;
-
     uint32_t timeout = GuestTimeoutToMilliseconds(Timeout);
+
+    if (Alertable)
+    {
+        uint32_t status = GuestThread::AlertableWait(timeout, [](uint32_t ms)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+            return uint32_t(STATUS_TIMEOUT);
+        });
+        return status == STATUS_USER_APC ? STATUS_USER_APC : STATUS_SUCCESS;
+    }
 
 #ifdef _WIN32
     Sleep(timeout);
@@ -1251,6 +1261,12 @@ uint32_t NtResumeThread(GuestThreadHandle* hThread, uint32_t* suspendCount)
     return S_OK;
 }
 
+uint32_t NtQueueApcThread(GuestThreadHandle* hThread, uint32_t ApcRoutine, uint32_t ApcRoutineContext, uint32_t SystemArgument1, uint32_t SystemArgument2)
+{
+    GuestThread::QueueApc(hThread, { ApcRoutine, ApcRoutineContext, SystemArgument1, SystemArgument2 });
+    return STATUS_SUCCESS;
+}
+
 uint32_t NtSetEvent(Event* handle, uint32_t* previousState)
 {
     handle->Set();
@@ -1275,9 +1291,19 @@ uint32_t NtReleaseSemaphore(Semaphore* Handle, uint32_t ReleaseCount, int32_t* P
 }
 
 // Waits on kernel handles: WaitType 0 = all, 1 = any.
+static uint32_t WaitForMultipleObjects(uint32_t Count, be<uint32_t>* Handles, uint32_t WaitType, uint32_t timeout);
+
 uint32_t NtWaitForMultipleObjectsEx(uint32_t Count, be<uint32_t>* Handles, uint32_t WaitType, uint32_t WaitMode, uint32_t Alertable, be<int64_t>* Timeout)
 {
     const uint32_t timeout = GuestTimeoutToMilliseconds(Timeout);
+    if (Alertable)
+        return GuestThread::AlertableWait(timeout, [=](uint32_t ms) { return WaitForMultipleObjects(Count, Handles, WaitType, ms); });
+
+    return WaitForMultipleObjects(Count, Handles, WaitType, timeout);
+}
+
+static uint32_t WaitForMultipleObjects(uint32_t Count, be<uint32_t>* Handles, uint32_t WaitType, uint32_t timeout)
+{
     if (WaitType == 0)
     {
         for (uint32_t i = 0; i < Count; i++)
@@ -1624,6 +1650,7 @@ GUEST_FUNCTION_HOOK(__imp____C_specific_handler, __C_specific_handler_x);
 GUEST_FUNCTION_HOOK(__imp__RtlNtStatusToDosError, RtlNtStatusToDosError);
 GUEST_FUNCTION_HOOK(__imp__RtlUnicodeToMultiByteN, RtlUnicodeToMultiByteN);
 GUEST_FUNCTION_HOOK(__imp__KeDelayExecutionThread, KeDelayExecutionThread);
+GUEST_FUNCTION_HOOK(__imp__NtQueueApcThread, NtQueueApcThread);
 GUEST_FUNCTION_HOOK(__imp__ExFreePool, ExFreePool);
 GUEST_FUNCTION_HOOK(__imp__NtDuplicateObject, NtDuplicateObject);
 GUEST_FUNCTION_HOOK(__imp__ObDereferenceObject, ObDereferenceObject);
