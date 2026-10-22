@@ -2278,6 +2278,44 @@ labels = [
     0x82D4A4B4,
 ]
 
+# bctr 0x82D54400 (no bounds check; size inferred)
+[[switch]]
+base = 0x82D543D8
+r = 10
+default = 0x0
+labels = [
+    0x82D54404,
+    0x82D5457C,
+    0x82D54618,
+    0x82D546A0,
+    0x82D54704,
+    0x82D54728,
+    0x82D547E0,
+    0x82D5490C,
+    0x82D549C0,
+    0x82D54A78,
+    0x82D54AB8,
+    0x82D54AE4,
+    0x82D54AF0,
+    0x82D54BB8,
+    0x82D54C20,
+    0x82D54C9C,
+    0x82D54D64,
+    0x82D55034,
+    0x82D5510C,
+    0x82D552C8,
+    0x82D55330,
+    0x82D55478,
+    0x82D55500,
+    0x82D555AC,
+    0x82D555C8,
+    0x82D556A4,
+    0x82D55744,
+    0x82D5574C,
+    0x82D558A0,
+    0x82D54404,
+]
+
 # bctr 0x82DBEF98
 [[switch]]
 base = 0x82DBEF68
@@ -2537,6 +2575,43 @@ labels = [
     0x82E2F290,
 ]
 
+# bctr 0x82E55EC4 (no bounds check; size inferred)
+[[switch]]
+base = 0x82E55EAC
+r = 17
+default = 0x0
+labels = [
+    0x82E55F3C,
+    0x82E560BC,
+    0x82E56170,
+    0x82E56204,
+    0x82E56294,
+    0x82E5633C,
+    0x82E563FC,
+    0x82E564BC,
+    0x82E56578,
+    0x82E5661C,
+    0x82E56684,
+    0x82E566B0,
+    0x82E566BC,
+    0x82E567B0,
+    0x82E5681C,
+    0x82E56878,
+    0x82E56900,
+    0x82E56A1C,
+    0x82E56D40,
+    0x82E56F38,
+    0x82E56FA0,
+    0x82E5711C,
+    0x82E571A4,
+    0x82E57250,
+    0x82E57274,
+    0x82E57354,
+    0x82E57400,
+    0x82E57408,
+    0x82E5755C,
+]
+
 # bctr 0x82EAE1D8
 [[switch]]
 base = 0x82EAE1BC
@@ -2769,6 +2844,62 @@ labels = [
     0x82EF4010,
 ]
 
+# bctr 0x82EFF5D0 (no bounds check; size inferred)
+[[switch]]
+base = 0x82EFF5A8
+r = 11
+default = 0x0
+labels = [
+    0x82EFF5F8,
+    0x82EFF5F8,
+    0x82EFF650,
+    0x82EFF5F8,
+    0x82EFF5F8,
+    0x82EFF5F8,
+    0x82EFF650,
+    0x82EFF650,
+    0x82EFF5F8,
+    0x82EFF650,
+    0x82EFF650,
+    0x82EFF650,
+    0x82EFF650,
+    0x82EFF5F8,
+    0x82EFF650,
+    0x82EFF650,
+    0x82EFF650,
+    0x82EFF5F8,
+    0x82EFF5F8,
+    0x82EFF5F8,
+    0x82EFF650,
+    0x82EFF5F8,
+    0x82EFF5F8,
+    0x82EFF5F8,
+    0x82EFF5F8,
+    0x82EFF5D4,
+    0x82EFF5F8,
+    0x82EFF5F8,
+    0x82EFF5D4,
+    0x82EFF5D4,
+    0x82EFF5D4,
+    0x82EFF5D4,
+    0x82EFF5E0,
+    0x82EFF5E0,
+    0x82EFF5E0,
+    0x82EFF5E0,
+]
+
+# bctr 0x82F0550C (no bounds check; size inferred)
+[[switch]]
+base = 0x82F054E4
+r = 11
+default = 0x0
+labels = [
+    0x82F05540,
+    0x82F05540,
+    0x82F05540,
+    0x82F05540,
+]
+
 # bctr 0x82F0A440
 [[switch]]
 base = 0x82F0A414
@@ -2792,6 +2923,24 @@ labels = [
     0x82F0A5BC,
     0x82F0A5D4,
     0x82F0A5EC,
+]
+
+# bctr 0x82F0F600 (no bounds check; size inferred)
+[[switch]]
+base = 0x82F0F5D8
+r = 11
+default = 0x0
+labels = [
+    0x82F0F604,
+    0x82F0F610,
+    0x82F0F610,
+    0x82F0F604,
+    0x82F0F604,
+    0x82F0F604,
+    0x82F0F618,
+    0x82F0F620,
+    0x82F0F610,
+    0x82F0F610,
 ]
 
 # bctr 0x82F0FFF4
@@ -3930,6 +4079,30 @@ labels = [
     0x82F98340,
     0x82F9838C,
     0x82F9839C,
+]
+
+# bctr 0x82F98380 (no bounds check; size inferred)
+[[switch]]
+base = 0x82F98358
+r = 9
+default = 0x0
+labels = [
+    0x82F983C4,
+    0x82F983CC,
+    0x82F983D4,
+    0x82F983DC,
+    0x82F983E4,
+    0x82F983EC,
+    0x82F983F4,
+    0x82F983FC,
+    0x82F98404,
+    0x82F9840C,
+    0x82F98414,
+    0x82F98420,
+    0x82F98428,
+    0x82F98430,
+    0x82F98438,
+    0x82F98010,
 ]
 
 # bctr 0x82F9D124
@@ -6911,6 +7084,30 @@ labels = [
     0x830FA3C0,
     0x830FA3C0,
     0x830FA4CC,
+]
+
+# bctr 0x830FA5EC (no bounds check; size inferred)
+[[switch]]
+base = 0x830FA5C4
+r = 29
+default = 0x0
+labels = [
+    0x830FA5F0,
+    0x830FA5F0,
+    0x830FA0E4,
+    0x830FA5F0,
+    0x830FA5F0,
+    0x830FA5F0,
+    0x830FA5F0,
+    0x830FA0E4,
+    0x830FA0E4,
+    0x830FA5F0,
+    0x830FA0E4,
+    0x830FA0E4,
+    0x830FA5F0,
+    0x830FA5F0,
+    0x830FA5F0,
+    0x830FA5F0,
 ]
 
 # bctr 0x83122A5C

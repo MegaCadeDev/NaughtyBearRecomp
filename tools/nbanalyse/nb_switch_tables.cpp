@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <iterator>
 #include <map>
+#include <set>
 #include <optional>
 #include <string>
 #include <vector>
@@ -61,7 +62,17 @@ namespace
         return insn.operands[4] == 31 - shift;
     }
 
-    std::optional<SwitchTable> Analyse(const Image& image, const uint32_t* code, uint32_t bctrAddr, size_t maxBack)
+    // For a switch with no bounds check next to it: the index register and window to execute,
+    // plus the limits used to decide how many table entries are real.
+    struct UnboundedHint
+    {
+        uint32_t r;
+        size_t startBack;
+        uint32_t labelLo, labelHi; // labels must land in [lo, hi)
+        uint32_t tableLimit;       // the next known table starts here
+    };
+
+    std::optional<SwitchTable> Analyse(const Image& image, const uint32_t* code, uint32_t bctrAddr, size_t maxBack, const UnboundedHint* hint = nullptr)
     {
         ppc_insn insn;
 
@@ -71,7 +82,13 @@ namespace
         SwitchTable table{};
         table.bctr = bctrAddr;
 
-        for (size_t i = 1; i <= maxBack; i++)
+        if (hint != nullptr)
+        {
+            table.r = hint->r;
+            cmpBack = hint->startBack;
+        }
+
+        for (size_t i = 1; hint == nullptr && i <= maxBack; i++)
         {
             ppc::Disassemble(&code[-(ptrdiff_t)i], bctrAddr - 4 * i, insn);
             if (insn.opcode == nullptr)
@@ -120,7 +137,7 @@ namespace
 
         // The compiler sometimes copies the index right around the check ("mr r4, r3; cmplwi r3, N"),
         // then dispatches on the copy. Treat such a copy as the index too.
-        for (size_t i = cmpBack + 1; i <= std::min(maxBack, cmpBack + 6); i++)
+        for (size_t i = cmpBack + 1; hint == nullptr && i <= std::min(maxBack, cmpBack + 6); i++)
         {
             ppc::Disassemble(&code[-(ptrdiff_t)i], bctrAddr - 4 * i, insn);
             if (insn.opcode == nullptr || insn.opcode->id != PPC_INST_MR)
@@ -276,10 +293,18 @@ namespace
 
         table.entrySize = ctrValue->entrySize;
         table.tableAddr = ctrValue->tableAddr;
+        if (hint != nullptr)
+            table.labels.resize(4096);
+
         for (size_t i = 0; i < table.labels.size(); i++)
         {
             uint32_t entryAddr = ctrValue->tableAddr + i * ctrValue->entrySize;
             const void* p = image.Find(entryAddr);
+            if (hint != nullptr && (p == nullptr || entryAddr >= hint->tableLimit))
+            {
+                table.labels.resize(i);
+                break;
+            }
             if (p == nullptr)
                 return std::nullopt;
 
@@ -292,7 +317,18 @@ namespace
             }
 
             table.labels[i] = ctrValue->value + (entry << ctrValue->shift);
+
+            // Without a bounds check, the table is as long as its entries keep landing in the function.
+            // Extra entries are harmless (those cases are never taken); missing ones would crash.
+            if (hint != nullptr && (table.labels[i] < hint->labelLo || table.labels[i] >= hint->labelHi || (table.labels[i] & 3) != 0))
+            {
+                table.labels.resize(i);
+                break;
+            }
         }
+
+        if (table.labels.empty())
+            return std::nullopt;
 
         // XenonRecomp arms the switch when it reaches `base` and fires on the next bctr.
         table.base = bctrAddr - 4 * cmpBack;
@@ -329,6 +365,19 @@ namespace
         }
 
         bool IsStart(uint32_t addr) const { return ranges.count(addr) != 0; }
+
+        // The .pdata function containing addr, or the gap between functions it falls in.
+        std::pair<uint32_t, uint32_t> Enclosing(uint32_t addr) const
+        {
+            auto it = ranges.upper_bound(addr);
+            uint32_t next = it != ranges.end() ? it->first : UINT32_MAX;
+            if (it == ranges.begin())
+                return { 0, next };
+            auto prev = std::prev(it);
+            if (addr < prev->second)
+                return { prev->first, prev->second };
+            return { prev->second, next };
+        }
     };
 
     constexpr uint32_t kBlr = 0x4E800020;
@@ -455,60 +504,124 @@ int main(int argc, char** argv)
     std::vector<LeafFunction> leafFunctions;
     size_t bctrs = 0, found = 0, outside = 0, sizes[5]{};
 
+    struct Found
+    {
+        SwitchTable table;
+        const Section* section;
+        bool unbounded;
+    };
+    std::vector<Found> tables;
+    std::vector<std::pair<const Section*, size_t>> unresolved; // bctr index within section
+
+    // Pass 1: switches with a bounds check.
     for (const auto& section : image.sections)
     {
         if (!(section.flags & SectionFlags_Code))
             continue;
 
         auto* code = (const uint32_t*)section.data;
-        size_t count = section.size / 4;
         ppc_insn insn;
-
-        for (size_t i = 0; i < count; i++)
+        for (size_t i = 0; i < section.size / 4; i++)
         {
             ppc::Disassemble(&code[i], section.base + i * 4, insn);
             if (insn.opcode == nullptr || insn.opcode->id != PPC_INST_BCTR)
                 continue;
 
             bctrs++;
-            uint32_t addr = uint32_t(section.base + i * 4);
-            auto table = Analyse(image, &code[i], addr, std::min<size_t>(i, 32));
-            if (!table)
-                continue;
-
-            found++;
-            sizes[table->entrySize]++;
-
-            // Sanity check: labels should land inside the code section near the dispatch.
-            for (auto label : table->labels)
-            {
-                if (label < section.base || label >= section.base + section.size)
-                {
-                    outside++;
-                    break;
-                }
-            }
-
-            if (!pdata.Contains(table->bctr))
-            {
-                if (auto bounds = LeafFunctionBounds(image, section, pdata, *table))
-                    leafFunctions.push_back({ bounds->first, bounds->second, table->bctr, table->defaultLabel,
-                        table->tableAddr, table->tableAddr + uint32_t(table->labels.size()) * table->entrySize, table->labels, &section });
-                else
-                    fmt::println("warning: could not bound leaf function around switch at 0x{:X}", table->bctr);
-            }
-
-            out += fmt::format("# bctr 0x{:X}\n", table->bctr);
-            out += fmt::format("[[switch]]\nbase = 0x{:X}\nr = {}\ndefault = 0x{:X}\nlabels = [\n", table->base, table->r, table->defaultLabel);
-            for (auto label : table->labels)
-                out += fmt::format("    0x{:X},\n", label);
-            out += "]\n\n";
+            if (auto table = Analyse(image, &code[i], uint32_t(section.base + i * 4), std::min<size_t>(i, 32)))
+                tables.push_back({ std::move(*table), &section, false });
+            else
+                unresolved.emplace_back(&section, i);
         }
     }
 
+    // Pass 2: switches whose index was validated elsewhere. Try short windows ending at the
+    // bctr with each register as the index, and size the table from where its labels stop
+    // landing in the function or where the next known table begins.
+    std::set<uint32_t> tableStarts;
+    for (const auto& t : tables)
+        tableStarts.insert(t.table.tableAddr);
+
+    size_t unbounded = 0;
+    for (auto [section, i] : unresolved)
+    {
+        auto* code = (const uint32_t*)section->data;
+        uint32_t addr = uint32_t(section->base + i * 4);
+        auto [lo, hi] = pdata.Enclosing(addr);
+
+        for (size_t startBack = 2; startBack <= std::min<size_t>(i, 24); startBack++)
+        {
+            std::optional<SwitchTable> match;
+            int matches = 0;
+            for (uint32_t r = 1; r < 32; r++)
+            {
+                UnboundedHint hint{ r, startBack, lo, hi, UINT32_MAX };
+                auto table = Analyse(image, &code[i], addr, std::min<size_t>(i, 32), &hint);
+                if (!table)
+                    continue;
+
+                // Re-read with the table capped at the next known table.
+                auto next = tableStarts.upper_bound(table->tableAddr);
+                hint.tableLimit = next != tableStarts.end() ? *next : UINT32_MAX;
+                table = Analyse(image, &code[i], addr, std::min<size_t>(i, 32), &hint);
+                if (!table)
+                    continue;
+
+                matches++;
+                match = std::move(table);
+            }
+
+            if (matches == 1)
+            {
+                fmt::println("unbounded switch at 0x{:X}: index r{}, {} entries", addr, match->r, match->labels.size());
+                tableStarts.insert(match->tableAddr);
+                tables.push_back({ std::move(*match), section, true });
+                unbounded++;
+                break;
+            }
+            if (matches > 1)
+                break;
+        }
+    }
+
+    std::sort(tables.begin(), tables.end(), [](auto& a, auto& b) { return a.table.bctr < b.table.bctr; });
+
+    for (const auto& [t, sectionPtr, isUnbounded] : tables)
+    {
+        const auto* table = &t;
+        const auto& section = *sectionPtr;
+        found++;
+        sizes[table->entrySize]++;
+
+        // Sanity check: labels should land inside the code section near the dispatch.
+        for (auto label : table->labels)
+        {
+            if (label < section.base || label >= section.base + section.size)
+            {
+                outside++;
+                break;
+            }
+        }
+
+        if (!pdata.Contains(table->bctr))
+        {
+            if (auto bounds = LeafFunctionBounds(image, section, pdata, *table))
+                leafFunctions.push_back({ bounds->first, bounds->second, table->bctr, table->defaultLabel,
+                    table->tableAddr, table->tableAddr + uint32_t(table->labels.size()) * table->entrySize, table->labels, &section });
+            else
+                fmt::println("warning: could not bound leaf function around switch at 0x{:X}", table->bctr);
+        }
+
+        out += fmt::format("# bctr 0x{:X}{}\n", table->bctr, isUnbounded ? " (no bounds check; size inferred)" : "");
+        out += fmt::format("[[switch]]\nbase = 0x{:X}\nr = {}\ndefault = 0x{:X}\nlabels = [\n", table->base, table->r, table->defaultLabel);
+        for (auto label : table->labels)
+            out += fmt::format("    0x{:X},\n", label);
+        out += "]\n\n";
+    }
+
     std::ofstream(argv[2]).write(out.data(), out.size());
-    fmt::println("bctr: {}, jump tables: {} (word {}, half {}, byte {}), tables with labels outside .text: {}",
-        bctrs, found, sizes[4], sizes[2], sizes[1], outside);
+    fmt::println("bctr: {}, jump tables: {} (word {}, half {}, byte {}; {} without bounds check), tables with labels outside .text: {}",
+        bctrs, found, sizes[4], sizes[2], sizes[1], unbounded, outside);
 
     // Neighbouring leaf functions can share tail-merged code: a common default case, or case
     // bodies that branch into another function's tail. Split the ranges at every branch target

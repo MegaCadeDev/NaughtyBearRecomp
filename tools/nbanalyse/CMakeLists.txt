@@ -20,3 +20,9 @@ target_link_libraries(find_bytes PRIVATE XenonUtils fmt::fmt)
 
 add_executable(imports imports.cpp)
 target_link_libraries(imports PRIVATE XenonUtils fmt::fmt)
+
+add_executable(funcinfo funcinfo.cpp)
+target_link_libraries(funcinfo PRIVATE XenonUtils fmt::fmt)
+
+add_executable(eh_handlers eh_handlers.cpp)
+target_link_libraries(eh_handlers PRIVATE XenonUtils fmt::fmt)
