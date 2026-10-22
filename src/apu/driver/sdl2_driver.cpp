@@ -113,6 +113,44 @@ void XAudioRegisterClient(PPCFunc* callback, uint32_t param)
     g_audioThread = std::make_unique<std::thread>(AudioThread);
 }
 
+// NB_AUDIO_DUMP=file.wav records the output (stereo, 48 kHz, 32-bit float).
+static void DumpAudio(const float* frames, size_t count)
+{
+    static const char* path = getenv("NB_AUDIO_DUMP");
+    static std::ofstream file;
+    static uint32_t dataBytes = 0;
+    if (path == nullptr)
+        return;
+    if (!file.is_open())
+    {
+        file.open(path, std::ios::binary);
+        file.write(std::string(44, '\0').data(), 44);
+    }
+    file.write((const char*)frames, count * sizeof(float));
+    dataBytes += uint32_t(count * sizeof(float));
+
+    // Keep the header valid as the file grows.
+    auto put32 = [&](uint32_t offset, uint32_t value) { file.seekp(offset); file.write((const char*)&value, 4); };
+    auto put16 = [&](uint32_t offset, uint16_t value) { file.seekp(offset); file.write((const char*)&value, 2); };
+    file.seekp(0);
+    file.write("RIFF", 4);
+    put32(4, 36 + dataBytes);
+    file.seekp(8);
+    file.write("WAVEfmt ", 8);
+    put32(16, 16);
+    put16(20, 3); // IEEE float
+    put16(22, 2);
+    put32(24, XAUDIO_SAMPLES_HZ);
+    put32(28, XAUDIO_SAMPLES_HZ * 8);
+    put16(32, 8);
+    put16(34, 32);
+    file.seekp(36);
+    file.write("data", 4);
+    put32(40, dataBytes);
+    file.seekp(0, std::ios::end);
+    file.flush();
+}
+
 void XAudioSubmitFrame(void* samples)
 {
     auto floatSamples = reinterpret_cast<be<float>*>(samples);
@@ -133,6 +171,7 @@ void XAudioSubmitFrame(void* samples)
             audioFrames[i * 2 + 0] = (ch0 + ch2 * 0.75f + ch4) * g_volume;
             audioFrames[i * 2 + 1] = (ch1 + ch2 * 0.75f + ch5) * g_volume;
         }
+        DumpAudio(audioFrames.data(), audioFrames.size());
 
         SDL_QueueAudio(g_audioDevice, audioFrames.data(), sizeof(audioFrames));
     }

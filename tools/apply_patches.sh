@@ -3,7 +3,7 @@
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 
-for sub in "$root/tools/XenonRecomp" "$root/tools/XenosRecomp" "$root/thirdparty/plume"; do
+for sub in "$root/tools/XenonRecomp" "$root/tools/XenosRecomp" "$root/thirdparty/plume" "$root/thirdparty/FFmpeg"; do
     name="$(basename "$sub")"
     [ -d "$root/patches/$name" ] || continue
     git -C "$sub" checkout -- .

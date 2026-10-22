@@ -8,4 +8,5 @@ namespace xma
     void Init();
     uint32_t AllocateContext();
     void ReleaseContext(uint32_t context);
+    void ProcessRegisters();
 }

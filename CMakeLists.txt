@@ -107,15 +107,27 @@ target_include_directories(NaughtyBear PRIVATE
     ${HOST_SHADER_DIR})
 target_precompile_headers(NaughtyBear PRIVATE src/stdafx.h)
 
-# FFmpeg decodes XMA audio (src/apu/xma.cpp); without it the game runs silent.
-find_package(PkgConfig QUIET)
-if (PKG_CONFIG_FOUND)
-    pkg_check_modules(FFMPEG IMPORTED_TARGET libavcodec libavutil)
-endif()
-if (FFMPEG_FOUND)
-    target_compile_definitions(NaughtyBear PRIVATE NB_HAVE_FFMPEG)
-    target_link_libraries(NaughtyBear PRIVATE PkgConfig::FFMPEG)
-else()
-    message(WARNING "FFmpeg (libavcodec, libavutil) not found: audio will be silent. Install libavcodec-dev and libavutil-dev.")
-endif()
+# FFmpeg decodes XMA audio (src/apu/xma.cpp): a minimal static build of the submodule,
+# with only the XMA decoders.
+include(ExternalProject)
+set(FFMPEG_PREFIX ${CMAKE_BINARY_DIR}/ffmpeg)
+ExternalProject_Add(ffmpeg_build
+    SOURCE_DIR ${CMAKE_SOURCE_DIR}/thirdparty/FFmpeg
+    BINARY_DIR ${FFMPEG_PREFIX}/build
+    INSTALL_DIR ${FFMPEG_PREFIX}
+    PATCH_COMMAND sh -c "git apply --reverse --check ${CMAKE_SOURCE_DIR}/patches/FFmpeg/*.patch 2>/dev/null || git apply ${CMAKE_SOURCE_DIR}/patches/FFmpeg/*.patch"
+    CONFIGURE_COMMAND ${CMAKE_SOURCE_DIR}/thirdparty/FFmpeg/configure --prefix=<INSTALL_DIR> --cc=${CMAKE_C_COMPILER}
+        --disable-everything --disable-programs --disable-doc --disable-network --disable-autodetect --disable-asm
+        --disable-debug --enable-decoder=xma1,xma2 --disable-avdevice --disable-avformat --disable-swscale
+        --disable-swresample --disable-postproc --disable-avfilter --enable-static --disable-shared --enable-pic
+    BUILD_COMMAND make -j
+    INSTALL_COMMAND make install
+    BUILD_BYPRODUCTS ${FFMPEG_PREFIX}/lib/libavcodec.a ${FFMPEG_PREFIX}/lib/libavutil.a)
+file(MAKE_DIRECTORY ${FFMPEG_PREFIX}/include)
+add_library(ffmpeg INTERFACE)
+add_dependencies(ffmpeg ffmpeg_build)
+target_include_directories(ffmpeg INTERFACE ${FFMPEG_PREFIX}/include)
+target_link_libraries(ffmpeg INTERFACE ${FFMPEG_PREFIX}/lib/libavcodec.a ${FFMPEG_PREFIX}/lib/libavutil.a m)
+target_compile_definitions(NaughtyBear PRIVATE NB_HAVE_FFMPEG)
+target_link_libraries(NaughtyBear PRIVATE ffmpeg)
 target_link_libraries(NaughtyBear PRIVATE NaughtyBearRecompLib XenonUtils o1heap fmt::fmt xxHash::xxhash plume SDL2::SDL2 libzstd_static smolv)

@@ -1,12 +1,15 @@
 // XMA decoder emulation. The context layout and the register interface follow Xenia's
 // documentation of the hardware (src/xenia/apu/xma_context.h, xma_register_table.inc;
-// BSD licence, see NOTICE.md); decoding uses FFmpeg's XMA2 decoder on whole 2 KB packets.
+// BSD licence, see NOTICE.md); decoding uses FFmpeg's XMA2 decoder on whole 2 KB packets
+// (patched not to hold samples back: patches/FFmpeg).
 //
 // The XAudio library allocates contexts with XMACreateContext, fills in their input
 // buffers (2 KB packets), output ring (256-byte blocks of 16-bit big-endian PCM) and loop
 // points, and writes bit masks to the decoder's Kick / Lock / Clear registers. Those are
 // plain stores into guest memory here, so a worker thread swaps them with zero to pick
 // the writes up. A kick decodes until the output ring is full or the input runs out.
+// The library functions that write the registers are hooked too, so that a kick is
+// decoded before the library goes on (as with the hardware); the thread is a fallback.
 #include <stdafx.h>
 #include "xma.h"
 #include <kernel/heap.h>
@@ -130,6 +133,11 @@ namespace xma
         }
 
 #ifdef NB_HAVE_FFMPEG
+        // Statistics, logged with NB_DEBUG_XMA=1.
+        std::atomic<uint64_t> g_packetsDecoded, g_packetErrors, g_samplesDecoded, g_kicks;
+        std::atomic<uint64_t> g_works, g_stopFull, g_stopEmpty, g_blocksWritten, g_noOutputValid;
+        std::atomic<uint64_t> g_opens, g_clears, g_loopJumps, g_swaps;
+
         void CloseCodec(Context& context)
         {
             if (context.codec != nullptr)
@@ -142,6 +150,7 @@ namespace xma
             if (context.codec != nullptr && context.codecSampleRate == uint32_t(sampleRate) && context.codecStereo == stereo)
                 return true;
             CloseCodec(context);
+            g_opens++;
 
             const AVCodec* codec = avcodec_find_decoder(AV_CODEC_ID_XMA2);
             if (codec == nullptr)
@@ -183,6 +192,7 @@ namespace xma
             {
                 AVFrame* frame = context.frame;
                 uint32_t channels = context.codecStereo ? 2 : 1;
+                g_samplesDecoded += frame->nb_samples;
                 size_t start = context.pending.size();
                 context.pending.resize(start + size_t(frame->nb_samples) * channels * 2);
                 uint8_t* out = context.pending.data() + start;
@@ -202,30 +212,19 @@ namespace xma
 
         void DecodePacket(Context& context, const uint8_t* data)
         {
+            g_packetsDecoded++;
+
             av_packet_unref(context.packet);
             if (av_new_packet(context.packet, BYTES_PER_PACKET) < 0)
                 return;
             memcpy(context.packet->data, data, BYTES_PER_PACKET);
             if (avcodec_send_packet(context.codec, context.packet) == 0)
                 context.codecFed = true;
+            else
+                g_packetErrors++;
             ReceiveFrames(context);
         }
 
-        // The decoder holds samples back until the end of the stream; get them out.
-        void Flush(Context& context)
-        {
-            if (context.codec == nullptr || !context.codecFed)
-                return;
-            avcodec_send_packet(context.codec, nullptr);
-            ReceiveFrames(context);
-            avcodec_flush_buffers(context.codec);
-            context.codecFed = false;
-
-            // Pad the end of the sound to whole output blocks.
-            size_t remainder = context.pending.size() % OUTPUT_BLOCK_SIZE;
-            if (remainder != 0)
-                context.pending.resize(context.pending.size() + OUTPUT_BLOCK_SIZE - remainder, 0);
-        }
 #endif
 
         // Writes whole blocks of pending PCM to the output ring; returns false when it's full.
@@ -248,12 +247,18 @@ namespace xma
                 write = (write + 1) % blockCount;
             }
             context.pending.erase(context.pending.begin(), context.pending.begin() + size_t(blocks) * OUTPUT_BLOCK_SIZE);
+#ifdef NB_HAVE_FFMPEG
+            g_blocksWritten += blocks;
+#endif
             data.SetOutputWriteOffset(write);
             return pendingBlocks <= freeBlocks;
         }
 
         void SwapInputBuffer(ContextData& data)
         {
+#ifdef NB_HAVE_FFMPEG
+            g_swaps++;
+#endif
             data.SetInputBufferValid(data.CurrentBuffer(), false);
             data.SetCurrentBuffer(data.CurrentBuffer() ^ 1);
             data.SetReadOffset(0);
@@ -270,6 +275,11 @@ namespace xma
 
             uint32_t address = g_contextArray + id * CONTEXT_SIZE;
             ContextData data = Load(address);
+#ifdef NB_HAVE_FFMPEG
+            g_works++;
+            if (!data.OutputValid())
+                g_noOutputValid++;
+#endif
             if (!data.OutputValid())
                 return;
 
@@ -277,17 +287,24 @@ namespace xma
             for (uint32_t guard = 0; guard < 4096; guard++)
             {
                 if (!WriteOutput(context, data))
+                {
+                    g_stopFull++;
                     break; // output ring full
+                }
 
                 if (!data.InputBufferValid(0) && !data.InputBufferValid(1))
                 {
-                    if (context.codecFed)
+                    // Out of input: hand over a trailing partial block (padded with
+                    // silence). The decoder keeps its state, in case more input follows.
+                    size_t remainder = context.pending.size() % OUTPUT_BLOCK_SIZE;
+                    if (remainder != 0)
                     {
-                        Flush(context);
+                        context.pending.resize(context.pending.size() + OUTPUT_BLOCK_SIZE - remainder, 0);
                         continue;
                     }
                     if (context.pending.empty())
                         data.SetOutputValid(false);
+                    g_stopEmpty++;
                     break;
                 }
 
@@ -332,6 +349,7 @@ namespace xma
                 if (loopCount > 0 && data.LoopStart() < data.LoopEnd() && next > data.LoopEnd())
                 {
                     next = data.LoopStart();
+                    g_loopJumps++;
                     if (loopCount < 255)
                         data.SetLoopCount(loopCount - 1);
                 }
@@ -351,6 +369,9 @@ namespace xma
         {
             Context& context = g_contexts[id];
             std::lock_guard lock(context.mutex);
+#ifdef NB_HAVE_FFMPEG
+            g_clears++;
+#endif
             uint32_t address = g_contextArray + id * CONTEXT_SIZE;
             ContextData data = Load(address);
             data.SetInputBufferValid(0, false);
@@ -389,27 +410,55 @@ namespace xma
             return any;
         }
 
+        std::mutex g_registerMutex;
+    }
+
+    // Acts on Lock/Clear/Kick register writes, then decodes the kicked contexts.
+    void ProcessRegisters()
+        {
+            std::lock_guard registerLock(g_registerMutex);
+            TakeRegisterBits(REGISTER_LOCK, [](uint32_t id)
+                {
+                    std::lock_guard lock(g_contexts[id].mutex);
+                    g_contexts[id].enabled = false;
+                });
+            TakeRegisterBits(REGISTER_CLEAR, [](uint32_t id) { Clear(id); });
+            TakeRegisterBits(REGISTER_KICK, [](uint32_t id)
+                {
+#ifdef NB_HAVE_FFMPEG
+                    g_kicks++;
+#endif
+                    std::lock_guard lock(g_contexts[id].mutex);
+                    g_contexts[id].enabled = true;
+                });
+
+            for (uint32_t id = 0; id < CONTEXT_COUNT; id++)
+            {
+                if (g_contexts[id].enabled)
+                    Work(id);
+            }
+        }
+
+    namespace
+    {
         void WorkerThread()
         {
             while (true)
             {
-                TakeRegisterBits(REGISTER_LOCK, [](uint32_t id)
-                    {
-                        std::lock_guard lock(g_contexts[id].mutex);
-                        g_contexts[id].enabled = false;
-                    });
-                TakeRegisterBits(REGISTER_CLEAR, [](uint32_t id) { Clear(id); });
-                TakeRegisterBits(REGISTER_KICK, [](uint32_t id)
-                    {
-                        std::lock_guard lock(g_contexts[id].mutex);
-                        g_contexts[id].enabled = true;
-                    });
+                ProcessRegisters();
 
-                for (uint32_t id = 0; id < CONTEXT_COUNT; id++)
+#ifdef NB_HAVE_FFMPEG
+                static const bool debug = getenv("NB_DEBUG_XMA") != nullptr;
+                static auto lastReport = std::chrono::steady_clock::now();
+                if (debug && std::chrono::steady_clock::now() - lastReport > std::chrono::seconds(2))
                 {
-                    if (g_contexts[id].enabled)
-                        Work(id);
+                    lastReport = std::chrono::steady_clock::now();
+                    LOGF_IMPL(Utility, "XMA", "{} kicks, {} packets ({} rejected), {} samples; {} works ({} no output), {} full, {} empty, {} blocks",
+                        g_kicks.load(), g_packetsDecoded.load(), g_packetErrors.load(), g_samplesDecoded.load(), g_works.load(),
+                        g_noOutputValid.load(), g_stopFull.load(), g_stopEmpty.load(), g_blocksWritten.load());
+                    LOGF_IMPL(Utility, "XMA", "{} opens, {} clears, {} loop jumps, {} buffer swaps", g_opens.load(), g_clears.load(), g_loopJumps.load(), g_swaps.load());
                 }
+#endif
 
                 std::this_thread::sleep_for(std::chrono::microseconds(500));
             }
@@ -471,4 +520,27 @@ namespace xma
 #endif
         memset(g_memory.Translate(context), 0, CONTEXT_SIZE);
     }
+}
+
+// The XAudio library's XMA register writers: run the decoder as soon as they return.
+extern "C" PPC_FUNC(__imp__sub_82E96888); // kicks contexts
+extern "C" PPC_FUNC(__imp__sub_82E96718); // locks contexts
+extern "C" PPC_FUNC(__imp__sub_82E95EF0); // clears contexts
+
+PPC_FUNC(sub_82E96888)
+{
+    __imp__sub_82E96888(ctx, base);
+    xma::ProcessRegisters();
+}
+
+PPC_FUNC(sub_82E96718)
+{
+    __imp__sub_82E96718(ctx, base);
+    xma::ProcessRegisters();
+}
+
+PPC_FUNC(sub_82E95EF0)
+{
+    __imp__sub_82E95EF0(ctx, base);
+    xma::ProcessRegisters();
 }

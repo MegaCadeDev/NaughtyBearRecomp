@@ -36,4 +36,5 @@ Files written for this project: `src/kernel/virtual_memory.cpp`, `src/kernel/io/
 - Behaviour of several instructions and kernel functions, the Xenos register and fetch
   constant layouts, and the XMA decoder context layout and registers follow
   [Xenia](https://github.com/xenia-project/xenia) (BSD-3-Clause); no Xenia code is included.
-- XMA audio is decoded with [FFmpeg](https://ffmpeg.org) (LGPL-2.1+), linked dynamically.
+- XMA audio is decoded with [FFmpeg](https://ffmpeg.org) (LGPL-2.1+), built from source
+  (`thirdparty/FFmpeg`, with `patches/FFmpeg`) and linked statically.

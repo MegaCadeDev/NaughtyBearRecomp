@@ -17,9 +17,11 @@ shaders (translated by XenosRecomp), textures, render targets, depth/stencil and
 states, including skinned characters. Saves are kept in `save/` (one folder per save
 container) and persist between runs.
 
-Audio goes out through SDL. The game's sounds are XMA, decoded with FFmpeg
-(`sudo apt install libavcodec-dev libavutil-dev`, then re-run CMake); without FFmpeg the
-game runs silent. `NB_VOLUME=0..1` sets the volume, `NB_SURROUND=1` asks for 5.1 output.
+Audio goes out through SDL. The game's sounds are XMA; the console's XMA decoder is
+emulated (`src/apu/xma.cpp`) with FFmpeg's XMA2 decoder, built from the
+`thirdparty/FFmpeg` submodule with only that decoder (`patches/FFmpeg`). `NB_VOLUME=0..1`
+sets the volume, `NB_SURROUND=1` asks for 5.1 output, `NB_AUDIO_DUMP=file.wav` records
+the output and `NB_DEBUG_XMA=1` logs decoder statistics.
 
 Shaders the game creates are written to `shaders/dump/` while it runs (or to
 `NB_DUMP_SHADERS=dir`). Playing through new areas collects their shaders; then run
@@ -53,8 +55,7 @@ testing.
 ## Building
 
 Requires Clang 18+, CMake 3.20+, Ninja, SDL2 and Vulkan
-(`sudo apt install libsdl2-dev libvulkan-dev glslang-tools`), and FFmpeg for audio
-(`sudo apt install libavcodec-dev libavutil-dev`).
+(`sudo apt install libsdl2-dev libvulkan-dev glslang-tools`).
 
 ```bash
 git submodule update --init --recursive

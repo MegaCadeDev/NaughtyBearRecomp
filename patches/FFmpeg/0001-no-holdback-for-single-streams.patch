@@ -1,0 +1,15 @@
+diff --git a/libavcodec/wmaprodec.c b/libavcodec/wmaprodec.c
+index 61b86ad..c26cf8f 100644
+--- a/libavcodec/wmaprodec.c
++++ b/libavcodec/wmaprodec.c
+@@ -1917,7 +1917,9 @@ static int xma_decode_packet(AVCodecContext *avctx, AVFrame *frame,
+             nb_samples = FFMIN(nb_samples, av_audio_fifo_size(s->samples[0][i]));
+         }
+ 
+-        if (!eof && avpkt->size)
++        /* Naughty Bear Recomp: the holdback only keeps multiple streams in sync; a
++         * single stream (one XMA hardware context) is output as soon as it's decoded. */
++        if (!eof && avpkt->size && s->num_streams > 1)
+             nb_samples -= FFMIN(nb_samples, 4096);
+ 
+         /* copy samples from buffer to output if possible */

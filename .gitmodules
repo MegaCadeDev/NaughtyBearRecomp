@@ -10,3 +10,6 @@
 [submodule "thirdparty/plume"]
 	path = thirdparty/plume
 	url = https://github.com/renderbag/plume.git
+[submodule "thirdparty/FFmpeg"]
+	path = thirdparty/FFmpeg
+	url = https://github.com/FFmpeg/FFmpeg.git
