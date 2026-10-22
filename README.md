@@ -23,15 +23,17 @@ emulated (`src/apu/xma.cpp`) with FFmpeg's XMA2 decoder, built from the
 sets the volume, `NB_SURROUND=1` asks for 5.1 output, `NB_AUDIO_DUMP=file.wav` records
 the output and `NB_DEBUG_XMA=1` logs decoder statistics.
 
-Shaders the game creates are written to `shaders/dump/` while it runs (or to
-`NB_DUMP_SHADERS=dir`). Playing through new areas collects their shaders; then run
-`tools/translate_shaders.sh` and rebuild to add them to the cache. Draws whose shader is
-not in the cache yet are skipped.
+Shaders are translated when the game first runs: it decompresses its data packages,
+finds every shader in them and translates them all (XenosRecomp and DXC, linked into the
+game) while a progress bar shows, which takes a few seconds. They're kept in
+`cache/shaders.bin`, so later runs start straight away; any shader that still turns up
+during play is translated then. The cache is rebuilt when the translator or the game data
+changes.
 
 Debug options: `NB_SCREENSHOT=file.ppm[:frame]` (convert with `tools/ppm2png.py`),
 `NB_DEBUG_DRAWS=frame` (log every draw of a frame), `NB_DEBUG_DECLS=1`, `NB_NO_BLEND=1`,
 `NB_NO_DEPTH=1`, `NB_SHOW_RESOLVE=address` (present a resolved texture),
-`NB_ONLY_DECL=hash`, `NB_LOG_FILES=1`.
+`NB_ONLY_DECL=hash`, `NB_DUMP_SHADERS=dir`, `NB_LOG_FILES=1`.
 
 ## Controls
 

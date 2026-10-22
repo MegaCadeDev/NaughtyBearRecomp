@@ -27,6 +27,10 @@ Heap g_userHeap;
 
 static std::filesystem::path g_gamePath;
 
+// The executable's image in guest memory (the shader precache scans it).
+uint32_t g_imageBase = 0;
+uint32_t g_imageSize = 0;
+
 std::filesystem::path& GetGamePath()
 {
     return g_gamePath;
@@ -86,6 +90,8 @@ static uint32_t LdrLoadModule(const std::filesystem::path& path)
     // the header declares; guest memory starts zeroed, so copy only what the buffer holds.
     size_t loaded = std::min<size_t>(image.size, malloc_usable_size(image.data.get()));
     memcpy(g_memory.Translate(image.base), image.data.get(), loaded);
+    g_imageBase = uint32_t(image.base);
+    g_imageSize = uint32_t(loaded);
 
     // Function imports become thunks that call the runtime; remember them by export name so
     // XexGetProcedureAddress can hand them out.

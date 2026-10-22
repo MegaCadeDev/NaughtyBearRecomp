@@ -12,14 +12,12 @@
 // the resolved front buffer.
 
 #include <stdafx.h>
-#include <gpu/shader_cache.h>
+#include <gpu/shader_store.h>
 #include <gpu/video.h>
 #include <hid/hid.h>
 #include <kernel/memory.h>
 #include <os/logger.h>
 #include <plume_render_interface.h>
-#include <smolv.h>
-#include <zstd.h>
 #include <bit>
 
 #include <blit.vert.h>
@@ -328,8 +326,6 @@ namespace
     // Shaders: guest shader object -> container hash, recorded by the constructors.
     std::mutex g_shaderMutex;
     ankerl::unordered_dense::map<uint32_t, uint64_t> g_shaderHashes;
-    std::unique_ptr<uint8_t[]> g_shaderCache;
-    ankerl::unordered_dense::map<uint64_t, const ShaderCacheEntry*> g_shaderCacheEntriesByHash;
     ankerl::unordered_dense::map<uint64_t, std::unique_ptr<RenderShader>> g_shaders;
     ankerl::unordered_dense::map<uint64_t, VertexDeclaration> g_declarations;
     ankerl::unordered_dense::map<uint64_t, std::unique_ptr<RenderPipeline>> g_pipelines;
@@ -449,41 +445,27 @@ namespace
         return { memory, offset };
     }
 
-    void LoadShaderCache()
-    {
-        g_shaderCache = std::make_unique<uint8_t[]>(g_spirvCacheDecompressedSize);
-        ZSTD_decompress(g_shaderCache.get(), g_spirvCacheDecompressedSize, g_compressedSpirvCache, g_spirvCacheCompressedSize);
-        for (size_t i = 0; i < g_shaderCacheEntryCount; i++)
-            g_shaderCacheEntriesByHash[g_shaderCacheEntries[i].hash] = &g_shaderCacheEntries[i];
-        LOGFN("Video: {} translated shaders in the cache", g_shaderCacheEntryCount);
-    }
-
     RenderShader* GetShader(uint64_t hash)
     {
         if (auto it = g_shaders.find(hash); it != g_shaders.end())
             return it->second.get();
 
-        auto entry = g_shaderCacheEntriesByHash.find(hash);
-        if (entry == g_shaderCacheEntriesByHash.end())
+        const shader_store::Shader* translated = shader_store::Find(hash);
+        if (translated == nullptr)
         {
             if (g_missingShaders.insert(hash).second)
-                LOGF_WARNING("Shader {:016x} is not in the cache; dump and translate it (docs/d3d_map.md)", hash);
+                LOGF_WARNING("Shader {:016x} has not been translated", hash);
             return nullptr;
         }
 
-        const uint8_t* encoded = g_shaderCache.get() + entry->second->spirvOffset;
-        std::vector<uint8_t> decoded(smolv::GetDecodedBufferSize(encoded, entry->second->spirvSize));
-        if (!smolv::Decode(encoded, entry->second->spirvSize, decoded.data(), decoded.size()))
-            return nullptr;
-
-        auto shader = g_device->createShader(decoded.data(), decoded.size(), "main", RenderShaderFormat::SPIRV);
+        auto shader = g_device->createShader(translated->spirv.data(), translated->spirv.size(), "main", RenderShaderFormat::SPIRV);
         return (g_shaders[hash] = std::move(shader)).get();
     }
 
     uint32_t GetSpecConstantsMask(uint64_t hash)
     {
-        auto entry = g_shaderCacheEntriesByHash.find(hash);
-        return entry != g_shaderCacheEntriesByHash.end() ? entry->second->specConstantsMask : 0;
+        const shader_store::Shader* translated = shader_store::Find(hash);
+        return translated != nullptr ? translated->specConstantsMask : 0;
     }
 
     // ---- Vertex data ----
@@ -1470,6 +1452,87 @@ namespace
         g_commandList->setGraphicsDescriptorSet(g_samplerDescriptorSet.get(), 3);
     }
 
+    // Copies the present target to the swap chain and presents it. gameFrame counts it as
+    // one of the game's frames (pacing, statistics, scripted input).
+    void SubmitPresentTarget(bool gameFrame)
+    {
+        uint32_t index = 0;
+        bool acquired = g_swapChain->getWidth() == PRESENT_WIDTH && g_swapChain->getHeight() == PRESENT_HEIGHT
+            && g_swapChain->acquireTexture(g_acquireSemaphore.get(), &index);
+
+        bool screenshot = gameFrame && !g_screenshotPath.empty() && ++g_frameNumber == g_screenshotFrame;
+        if (screenshot)
+        {
+            RenderTextureBarrier toCopy(g_presentTarget.get(), RenderTextureLayout::COPY_SOURCE);
+            g_commandList->barriers(RenderBarrierStage::COPY, nullptr, 0, &toCopy, 1);
+            g_commandList->copyTextureRegion(
+                RenderTextureCopyLocation::PlacedFootprint(g_readbackBuffer.get(), BACKBUFFER_FORMAT, PRESENT_WIDTH, PRESENT_HEIGHT, 1, PRESENT_WIDTH),
+                RenderTextureCopyLocation::Subresource(g_presentTarget.get()));
+        }
+
+        if (acquired)
+        {
+            RenderTexture* backBuffer = g_swapChain->getTexture(index);
+            RenderTextureBarrier toCopy[] = {
+                RenderTextureBarrier(g_presentTarget.get(), RenderTextureLayout::COPY_SOURCE),
+                RenderTextureBarrier(backBuffer, RenderTextureLayout::COPY_DEST),
+            };
+            g_commandList->barriers(RenderBarrierStage::COPY, nullptr, 0, toCopy, 2);
+            g_commandList->copyTexture(backBuffer, g_presentTarget.get());
+            RenderTextureBarrier toPresent(backBuffer, RenderTextureLayout::PRESENT);
+            g_commandList->barriers(RenderBarrierStage::NONE, nullptr, 0, &toPresent, 1);
+        }
+        g_commandList->end();
+
+        const RenderCommandList* lists[] = { g_commandList.get() };
+        RenderCommandSemaphore* wait[] = { g_acquireSemaphore.get() };
+        RenderCommandSemaphore* signal[] = { g_renderSemaphore.get() };
+        g_queue->executeCommandLists(lists, 1, acquired ? wait : nullptr, acquired ? 1 : 0, acquired ? signal : nullptr, acquired ? 1 : 0, g_fence.get());
+        if (gameFrame)
+            PaceFrame();
+        if (acquired)
+            g_swapChain->present(index, signal, 1);
+        g_queue->waitForCommandFence(g_fence.get());
+
+        if (screenshot)
+        {
+            // B8G8R8A8 -> binary PPM (RGB).
+            auto* pixels = (const uint8_t*)g_readbackBuffer->map();
+            std::ofstream file(g_screenshotPath, std::ios::binary);
+            file << "P6\n" << PRESENT_WIDTH << " " << PRESENT_HEIGHT << "\n255\n";
+            for (uint32_t i = 0; i < PRESENT_WIDTH * PRESENT_HEIGHT; i++)
+            {
+                char rgb[3] = { char(pixels[i * 4 + 2]), char(pixels[i * 4 + 1]), char(pixels[i * 4 + 0]) };
+                file.write(rgb, 3);
+            }
+            g_readbackBuffer->unmap();
+            LOGFN("Video: saved frame {} to {}", g_frameNumber, g_screenshotPath);
+        }
+
+        if (!acquired && g_swapChain->needsResize())
+            g_swapChain->resize();
+        g_inFrame = false;
+        g_frameIndex++;
+        if ((g_frameIndex % 64) == 0)
+            ReleaseUnusedVertexBuffers();
+
+        if (!gameFrame)
+            return;
+
+        static uint64_t presented = 0;
+        static auto lastReport = std::chrono::steady_clock::now();
+        presented++;
+        g_presentedFrames = presented;
+        hid::OnFrame(presented);
+        auto now = std::chrono::steady_clock::now();
+        if (now - lastReport >= std::chrono::seconds(2))
+        {
+            LOGFN("Video: {} frames, last frame {} draws ({} skipped)", presented, g_drawsThisFrame, g_drawsSkippedThisFrame);
+            lastReport = now;
+        }
+    }
+
+
     // Copies the front buffer to the present target and on to the swap chain.
     void EndFrame(uint32_t frontBuffer)
     {
@@ -1517,76 +1580,25 @@ namespace
             Blit(BACKBUFFER_FORMAT, sourceDescriptor, SAMPLER_LINEAR_CLAMP, 0.0f, 0.0f, u1, v1,
                 RenderViewport(0.0f, 0.0f, float(PRESENT_WIDTH), float(PRESENT_HEIGHT), 0.0f, 1.0f));
 
-        uint32_t index = 0;
-        bool acquired = g_swapChain->getWidth() == PRESENT_WIDTH && g_swapChain->getHeight() == PRESENT_HEIGHT
-            && g_swapChain->acquireTexture(g_acquireSemaphore.get(), &index);
+        SubmitPresentTarget(true);
+    }
 
-        bool screenshot = !g_screenshotPath.empty() && ++g_frameNumber == g_screenshotFrame;
-        if (screenshot)
-        {
-            RenderTextureBarrier toCopy(g_presentTarget.get(), RenderTextureLayout::COPY_SOURCE);
-            g_commandList->barriers(RenderBarrierStage::COPY, nullptr, 0, &toCopy, 1);
-            g_commandList->copyTextureRegion(
-                RenderTextureCopyLocation::PlacedFootprint(g_readbackBuffer.get(), BACKBUFFER_FORMAT, PRESENT_WIDTH, PRESENT_HEIGHT, 1, PRESENT_WIDTH),
-                RenderTextureCopyLocation::Subresource(g_presentTarget.get()));
-        }
-
-        if (acquired)
-        {
-            RenderTexture* backBuffer = g_swapChain->getTexture(index);
-            RenderTextureBarrier toCopy[] = {
-                RenderTextureBarrier(g_presentTarget.get(), RenderTextureLayout::COPY_SOURCE),
-                RenderTextureBarrier(backBuffer, RenderTextureLayout::COPY_DEST),
-            };
-            g_commandList->barriers(RenderBarrierStage::COPY, nullptr, 0, toCopy, 2);
-            g_commandList->copyTexture(backBuffer, g_presentTarget.get());
-            RenderTextureBarrier toPresent(backBuffer, RenderTextureLayout::PRESENT);
-            g_commandList->barriers(RenderBarrierStage::NONE, nullptr, 0, &toPresent, 1);
-        }
-        g_commandList->end();
-
-        const RenderCommandList* lists[] = { g_commandList.get() };
-        RenderCommandSemaphore* wait[] = { g_acquireSemaphore.get() };
-        RenderCommandSemaphore* signal[] = { g_renderSemaphore.get() };
-        g_queue->executeCommandLists(lists, 1, acquired ? wait : nullptr, acquired ? 1 : 0, acquired ? signal : nullptr, acquired ? 1 : 0, g_fence.get());
-        PaceFrame();
-        if (acquired)
-            g_swapChain->present(index, signal, 1);
-        g_queue->waitForCommandFence(g_fence.get());
-
-        if (screenshot)
-        {
-            // B8G8R8A8 -> binary PPM (RGB).
-            auto* pixels = (const uint8_t*)g_readbackBuffer->map();
-            std::ofstream file(g_screenshotPath, std::ios::binary);
-            file << "P6\n" << PRESENT_WIDTH << " " << PRESENT_HEIGHT << "\n255\n";
-            for (uint32_t i = 0; i < PRESENT_WIDTH * PRESENT_HEIGHT; i++)
-            {
-                char rgb[3] = { char(pixels[i * 4 + 2]), char(pixels[i * 4 + 1]), char(pixels[i * 4 + 0]) };
-                file.write(rgb, 3);
-            }
-            g_readbackBuffer->unmap();
-            LOGFN("Video: saved frame {} to {}", g_frameNumber, g_screenshotPath);
-        }
-
-        if (!acquired && g_swapChain->needsResize())
-            g_swapChain->resize();
-        g_inFrame = false;
-        g_frameIndex++;
-        if ((g_frameIndex % 64) == 0)
-            ReleaseUnusedVertexBuffers();
-
-        static uint64_t presented = 0;
-        static auto lastReport = std::chrono::steady_clock::now();
-        presented++;
-        g_presentedFrames = presented;
-        hid::OnFrame(presented);
-        auto now = std::chrono::steady_clock::now();
-        if (now - lastReport >= std::chrono::seconds(2))
-        {
-            LOGFN("Video: {} frames, last frame {} draws ({} skipped)", presented, g_drawsThisFrame, g_drawsSkippedThisFrame);
-            lastReport = now;
-        }
+    // Shows a progress bar (shader preparation on the first run).
+    void DrawProgress(float fraction)
+    {
+        BeginFrame();
+        RenderTextureBarrier toTarget(g_presentTarget.get(), RenderTextureLayout::COLOR_WRITE);
+        g_commandList->barriers(RenderBarrierStage::GRAPHICS, nullptr, 0, &toTarget, 1);
+        g_commandList->setFramebuffer(g_presentFramebuffer.get());
+        g_framebufferBound = false;
+        g_commandList->clearColor(0, RenderColor(0.06f, 0.05f, 0.04f, 1.0f));
+        constexpr int32_t left = 340, right = 940, top = 600, bottom = 616;
+        RenderRect track(left - 2, top - 2, right + 2, bottom + 2);
+        g_commandList->clearColor(0, RenderColor(0.25f, 0.2f, 0.15f, 1.0f), &track, 1);
+        RenderRect fill(left, top, left + int32_t((right - left) * std::clamp(fraction, 0.0f, 1.0f)), bottom);
+        if (fill.right > fill.left)
+            g_commandList->clearColor(0, RenderColor(0.95f, 0.55f, 0.1f, 1.0f), &fill, 1);
+        SubmitPresentTarget(false);
     }
 
     // ---- Clears and resolves ----
@@ -2065,15 +2077,9 @@ namespace
         return XXH3_64bits(g_memory.Translate(container), size);
     }
 
-    // Shader containers the game creates are written to NB_DUMP_SHADERS (default: shaders/dump
-    // when that folder exists), for tools/translate_shaders.sh.
-    const char* g_shaderDumpDir = []() -> const char*
-    {
-        if (const char* dir = getenv("NB_DUMP_SHADERS"))
-            return dir;
-        std::error_code ec;
-        return std::filesystem::is_directory("shaders/dump", ec) ? "shaders/dump" : nullptr;
-    }();
+    // NB_DUMP_SHADERS=dir writes the shader containers the game creates there (debugging;
+    // tools/translate_shaders.sh translates such a folder offline).
+    const char* g_shaderDumpDir = getenv("NB_DUMP_SHADERS");
 
     void DumpShader(uint32_t container, uint64_t hash, bool pixel)
     {
@@ -2144,7 +2150,7 @@ bool Video::Init(SDL_Window* window)
         g_readbackBuffer = g_device->createBuffer(RenderBufferDesc::ReadbackBuffer(uint64_t(PRESENT_WIDTH) * PRESENT_HEIGHT * 4));
     }
 
-    LoadShaderCache();
+    shader_store::Init();
     LOGN("Video: Vulkan device and swap chain ready");
     return true;
 }
@@ -2167,6 +2173,13 @@ PPC_FUNC(sub_82F26FA0)
         g_guestDevice = Load32(deviceOut);
         HeadlessGpuOnDeviceCreated(g_guestDevice);
     }
+
+    // First run: translate the whole game's shaders (shows a progress bar).
+    shader_store::Precache([](float fraction)
+        {
+            std::lock_guard lock(g_videoMutex);
+            DrawProgress(fraction);
+        });
 }
 
 // D3DDevice_BeginTiling(dev, Flags, Count, pTileRects, pClearColor, ClearZ (f1), ClearStencil (r9)).
@@ -2244,6 +2257,7 @@ PPC_FUNC(sub_82F30050)
 {
     TRACE_ENTER(0x82F30050);
     uint64_t hash = HashShaderContainer(Load32(ctx.r5.u32));
+    shader_store::Ensure((const uint8_t*)g_memory.Translate(Load32(ctx.r5.u32)), hash);
     DumpShader(Load32(ctx.r5.u32), hash, false);
     RecordShader(ctx.r3.u32, hash);
     __imp__sub_82F30050(ctx, base);
@@ -2253,6 +2267,7 @@ PPC_FUNC(sub_82F2FF28)
 {
     TRACE_ENTER(0x82F2FF28);
     uint64_t hash = HashShaderContainer(Load32(ctx.r5.u32));
+    shader_store::Ensure((const uint8_t*)g_memory.Translate(Load32(ctx.r5.u32)), hash);
     DumpShader(Load32(ctx.r5.u32), hash, true);
     RecordShader(ctx.r3.u32, hash);
     __imp__sub_82F2FF28(ctx, base);
@@ -2261,6 +2276,7 @@ PPC_FUNC(sub_82F2FF28)
 PPC_FUNC(sub_82F30188)
 {
     uint64_t hash = HashShaderContainer(ctx.r3.u32);
+    shader_store::Ensure((const uint8_t*)g_memory.Translate(ctx.r3.u32), hash);
     DumpShader(ctx.r3.u32, hash, false);
     __imp__sub_82F30188(ctx, base);
     RecordShader(ctx.r3.u32, hash);
@@ -2269,6 +2285,7 @@ PPC_FUNC(sub_82F30188)
 PPC_FUNC(sub_82F2FF60)
 {
     uint64_t hash = HashShaderContainer(ctx.r3.u32);
+    shader_store::Ensure((const uint8_t*)g_memory.Translate(ctx.r3.u32), hash);
     DumpShader(ctx.r3.u32, hash, true);
     __imp__sub_82F2FF60(ctx, base);
     RecordShader(ctx.r3.u32, hash);

@@ -103,24 +103,29 @@ and argument shapes matching the XDK API.
 
 ## Shaders
 
-The game's data is in compressed `.lu` packages (`lu/*.lu`, signature `x36`), so shaders
-are captured at runtime instead: every shader container the game creates (through the
-vertex/pixel shader constructors `0x82F30050`/`0x82F2FF28` or `CreateVertexShader`/
-`CreatePixelShader` at `0x82F30188`/`0x82F2FF60`) is written to `shaders/dump/` when that
-folder exists, or to `NB_DUMP_SHADERS=dir`. They are standard XDK containers (magic
-`0x102A1100`; the microcode follows the virtual part, `virtualSize + physicalSize` bytes
-in all).
+The game's data is in packages (`lu/*.lu`): a header, then the payload, stored as is or
+as 1 MB chunks compressed with XMemCompress (LZX). `src/kernel/packages.cpp` reads them,
+decompressing with the game's own recompiled `XMemCreateDecompressionContext`
+(`0x830B5480`, LZX, 1 MB window, 64 KB partitions) and `XMemDecompress` (`0x830B5458`).
+These use the game's allocator, so they run once the game is up (after CreateDevice).
 
-`tools/translate_shaders.sh` runs XenosRecomp over the dump. Patches
-(`patches/XenosRecomp/`) needed for Naughty Bear:
+The packages and the executable hold 508 distinct shader containers (standard XDK
+containers: magic `0x102A1100`/`0x102A1101`, `virtualSize + physicalSize` bytes). About 30
+more are built in memory at boot. `src/gpu/shader_store.cpp` translates all of them on the
+first run and keeps the SPIR-V in `cache/shaders.bin`; shaders are identified by the XXH3
+hash of their container, recorded when the game creates them (constructors
+`0x82F30050`/`0x82F2FF28`, `CreateVertexShader`/`CreatePixelShader` `0x82F30188`/
+`0x82F2FF60`), and any one not yet translated is translated right there.
+
+Patches to XenosRecomp (`patches/XenosRecomp/`) for Naughty Bear:
 
 - Extra vertex input locations: 16-18 for `BLENDWEIGHT1`-`3`, 19-21 for
   `BLENDINDICES1`-`3`, 22-24 for the second normal/tangent/binormal and 25-26 for
   `COLOR2`-`3` (the runtime's table in `src/gpu/video.cpp` must match).
-- Inputs a shader fetches more than once are declared once.
+- Inputs a shader fetches more than once are declared once; fetches indexed by a computed
+  register (bone palettes) read the stream directly (`vfetchIndexed`).
 - Boolean constant arrays, with pixel shader boolean registers addressed from 128.
 - A shader that fails to compile is reported and left out instead of aborting.
 
-The 368 shaders seen through the menus and the start of episode 1 all translate to
-SPIR-V. Shaders only appear once the game constructs them, so the dump grows as more of
-the game is played; decoding the `.lu` packages would capture them all up front.
+`tools/translate_shaders.sh` still translates a folder of dumped containers
+(`NB_DUMP_SHADERS=dir`) offline, for debugging the translator.

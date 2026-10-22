@@ -29,7 +29,7 @@ target_compile_options(NaughtyBearRecompLib PRIVATE
 
 # Logging stubs for every import the runtime does not implement yet.
 file(GLOB_RECURSE RUNTIME_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/*.cpp)
-list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "src/gpu/fallback/")
+list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "src/gpu/fallback/|src/gpu/translator/")
 
 set(IMPORT_STUBS ${CMAKE_BINARY_DIR}/import_stubs.cpp)
 add_custom_command(
@@ -52,12 +52,36 @@ add_subdirectory(tools/XenosRecomp/thirdparty/zstd/build/cmake EXCLUDE_FROM_ALL)
 add_library(smolv STATIC tools/XenosRecomp/thirdparty/smol-v/source/smolv.cpp)
 target_include_directories(smolv PUBLIC tools/XenosRecomp/thirdparty/smol-v/source)
 
-# The translated shaders (tools/translate_shaders.sh), or an empty cache before that.
-set(SHADER_CACHE ${CMAKE_SOURCE_DIR}/build/shaders/shader_cache.cpp)
-if (NOT EXISTS ${SHADER_CACHE})
-    message(WARNING "No shader cache yet; run tools/translate_shaders.sh. Nothing will be drawn.")
-    set(SHADER_CACHE ${CMAKE_SOURCE_DIR}/src/gpu/fallback/shader_cache_empty.cpp)
-endif()
+# The shader translator, linked into the game: XenosRecomp's sources (patched,
+# tools/apply_patches.sh) and DXC, which ships with XenosRecomp and is copied next to the
+# executable. Shaders are translated when the game first runs (src/gpu/shader_store.cpp).
+set(XENOS_DIR ${CMAKE_SOURCE_DIR}/tools/XenosRecomp/XenosRecomp)
+set(DXC_DIR ${CMAKE_SOURCE_DIR}/tools/XenosRecomp/thirdparty/dxc-bin)
+set(SHADER_COMMON_TEXT ${CMAKE_BINARY_DIR}/translator/shader_common_text.h)
+file(READ ${XENOS_DIR}/shader_common.h SHADER_COMMON_CONTENTS)
+file(GLOB TRANSLATOR_PATCHES ${CMAKE_SOURCE_DIR}/patches/XenosRecomp/*.patch)
+set(TRANSLATOR_PATCH_CONTENTS "")
+foreach(patch ${TRANSLATOR_PATCHES})
+    file(READ ${patch} contents)
+    string(APPEND TRANSLATOR_PATCH_CONTENTS "${contents}")
+endforeach()
+string(SHA1 TRANSLATOR_PATCH_HASH "${TRANSLATOR_PATCH_CONTENTS}")
+file(WRITE ${SHADER_COMMON_TEXT}.tmp "#pragma once\nstatic const char SHADER_COMMON_TEXT[] = R\"NBHLSL(${SHADER_COMMON_CONTENTS})NBHLSL\";\nstatic const char TRANSLATOR_PATCH_HASH[] = \"${TRANSLATOR_PATCH_HASH}\";\n")
+configure_file(${SHADER_COMMON_TEXT}.tmp ${SHADER_COMMON_TEXT} COPYONLY)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${XENOS_DIR}/shader_common.h ${TRANSLATOR_PATCHES})
+
+add_library(dxcompiler SHARED IMPORTED)
+set_target_properties(dxcompiler PROPERTIES IMPORTED_LOCATION ${DXC_DIR}/lib/x64/libdxcompiler.so)
+target_include_directories(dxcompiler INTERFACE ${DXC_DIR}/inc)
+
+add_library(nb_shader_translator STATIC
+    src/gpu/translator/shader_translator.cpp
+    ${XENOS_DIR}/shader_recompiler.cpp
+    ${XENOS_DIR}/dxc_compiler.cpp)
+target_include_directories(nb_shader_translator PRIVATE ${XENOS_DIR} ${CMAKE_BINARY_DIR}/translator)
+target_precompile_headers(nb_shader_translator PRIVATE ${XENOS_DIR}/pch.h)
+target_compile_options(nb_shader_translator PRIVATE -Wno-switch -Wno-unused-variable -Wno-null-arithmetic -fms-extensions)
+target_link_libraries(nb_shader_translator PUBLIC dxcompiler PRIVATE fmt::fmt xxHash::xxhash smolv libzstd_static)
 
 add_library(o1heap STATIC thirdparty/o1heap/o1heap.c)
 target_include_directories(o1heap PUBLIC thirdparty/o1heap)
@@ -94,7 +118,7 @@ foreach(shader blit.vert:g_blitVS blit.frag:g_blitPS)
 endforeach()
 
 # The runtime: ported from Unleashed Recompiled (GPL-3.0), see NOTICE.md.
-add_executable(NaughtyBear ${RUNTIME_SOURCES} ${IMPORT_STUBS} ${TRACE_WRAPPERS} ${SHADER_CACHE} ${HOST_SHADER_HEADERS})
+add_executable(NaughtyBear ${RUNTIME_SOURCES} ${IMPORT_STUBS} ${TRACE_WRAPPERS} ${HOST_SHADER_HEADERS})
 if (NB_TRACE_D3D)
     target_compile_definitions(NaughtyBear PRIVATE NB_TRACE_D3D)
 endif()
@@ -130,4 +154,8 @@ target_include_directories(ffmpeg INTERFACE ${FFMPEG_PREFIX}/include)
 target_link_libraries(ffmpeg INTERFACE ${FFMPEG_PREFIX}/lib/libavcodec.a ${FFMPEG_PREFIX}/lib/libavutil.a m)
 target_compile_definitions(NaughtyBear PRIVATE NB_HAVE_FFMPEG)
 target_link_libraries(NaughtyBear PRIVATE ffmpeg)
+target_link_libraries(NaughtyBear PRIVATE nb_shader_translator)
+set_target_properties(NaughtyBear PROPERTIES BUILD_RPATH "$ORIGIN" INSTALL_RPATH "$ORIGIN")
+add_custom_command(TARGET NaughtyBear POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DXC_DIR}/lib/x64/libdxcompiler.so $<TARGET_FILE_DIR:NaughtyBear>)
 target_link_libraries(NaughtyBear PRIVATE NaughtyBearRecompLib XenonUtils o1heap fmt::fmt xxHash::xxhash plume SDL2::SDL2 libzstd_static smolv)

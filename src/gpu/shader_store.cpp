@@ -1,0 +1,283 @@
+#include <stdafx.h>
+#include "shader_store.h"
+#include <gpu/translator/shader_translator.h>
+#include <kernel/memory.h>
+#include <kernel/packages.h>
+#include <os/logger.h>
+#include <user/paths.h>
+#include <zstd.h>
+#include <map>
+
+// The executable's image in guest memory (main.cpp); scanned for the shaders it embeds.
+extern uint32_t g_imageBase;
+extern uint32_t g_imageSize;
+
+namespace shader_store
+{
+    namespace
+    {
+        // File: header, then the zstd-compressed entries (hash, specialization mask, size, SPIR-V).
+        constexpr uint32_t CACHE_MAGIC = 0x4853424E; // "NBSH"
+        constexpr uint32_t CACHE_FORMAT = 1;
+
+        struct CacheHeader
+        {
+            uint32_t magic;
+            uint32_t format;
+            uint64_t translatorVersion;
+            uint64_t dataFingerprint; // the game data the cache was precached from, 0 if not yet
+            uint32_t count;
+            uint32_t uncompressedSize;
+        };
+
+        std::mutex g_mutex;
+        ankerl::unordered_dense::map<uint64_t, std::unique_ptr<Shader>> g_shaders;
+        uint64_t g_dataFingerprint = 0;
+        std::atomic<bool> g_dirty = false;
+
+        std::filesystem::path CachePath()
+        {
+            return GetSavePath(false).parent_path() / "cache" / "shaders.bin";
+        }
+
+        // Identifies the game data: names, sizes and times of the packages and the executable.
+        uint64_t DataFingerprint()
+        {
+            std::vector<std::string> entries;
+            std::error_code ec;
+            for (const auto& entry : std::filesystem::directory_iterator(GetGamePath() / "lu", ec))
+            {
+                auto time = entry.last_write_time(ec).time_since_epoch().count();
+                entries.push_back(fmt::format("{}:{}:{}", entry.path().filename().string(), entry.file_size(ec), time));
+            }
+            auto xex = GetGamePath() / "Default.xex";
+            entries.push_back(fmt::format("xex:{}", std::filesystem::file_size(xex, ec)));
+            std::sort(entries.begin(), entries.end());
+            std::string joined;
+            for (const auto& entry : entries)
+                joined += entry + "\n";
+            return XXH3_64bits(joined.data(), joined.size()) | 1;
+        }
+
+        void Save()
+        {
+            std::vector<uint8_t> body;
+            uint32_t count = 0;
+            uint64_t fingerprint;
+            {
+                std::lock_guard lock(g_mutex);
+                fingerprint = g_dataFingerprint;
+                for (const auto& [hash, shader] : g_shaders)
+                {
+                    uint32_t size = uint32_t(shader->spirv.size());
+                    size_t offset = body.size();
+                    body.resize(offset + 16 + size);
+                    memcpy(body.data() + offset, &hash, 8);
+                    memcpy(body.data() + offset + 8, &shader->specConstantsMask, 4);
+                    memcpy(body.data() + offset + 12, &size, 4);
+                    memcpy(body.data() + offset + 16, shader->spirv.data(), size);
+                    count++;
+                }
+            }
+
+            std::vector<uint8_t> compressed(ZSTD_compressBound(body.size()));
+            size_t compressedSize = ZSTD_compress(compressed.data(), compressed.size(), body.data(), body.size(), 6);
+            if (ZSTD_isError(compressedSize))
+                return;
+
+            CacheHeader header{ CACHE_MAGIC, CACHE_FORMAT, shader_translator::Version(), fingerprint, count, uint32_t(body.size()) };
+            auto path = CachePath();
+            std::error_code ec;
+            std::filesystem::create_directories(path.parent_path(), ec);
+            auto temporary = path;
+            temporary += ".tmp";
+            {
+                std::ofstream file(temporary, std::ios::binary);
+                file.write((const char*)&header, sizeof(header));
+                file.write((const char*)compressed.data(), compressedSize);
+                if (!file)
+                    return;
+            }
+            std::filesystem::rename(temporary, path, ec);
+        }
+
+        // Saves the cache in the background whenever shaders were added.
+        void SaverThread()
+        {
+            while (true)
+            {
+                std::this_thread::sleep_for(std::chrono::seconds(3));
+                if (g_dirty.exchange(false))
+                    Save();
+            }
+        }
+
+        void Insert(uint64_t hash, std::vector<uint8_t>&& spirv, uint32_t specConstantsMask)
+        {
+            auto shader = std::make_unique<Shader>();
+            shader->spirv = std::move(spirv);
+            shader->specConstantsMask = specConstantsMask;
+            std::lock_guard lock(g_mutex);
+            g_shaders[hash] = std::move(shader);
+        }
+
+        // Finds the shader containers in data (no copies of ones already cached or seen).
+        void Scan(const uint8_t* data, size_t size, std::map<uint64_t, std::vector<uint8_t>>& found)
+        {
+            for (size_t i = 0; i + 64 <= size; i += 4)
+            {
+                if (data[i] != 0x10 || data[i + 1] != 0x2A || data[i + 2] != 0x11)
+                    continue;
+                size_t containerSize = shader_translator::ContainerSize(data + i, size - i);
+                if (containerSize == 0)
+                    continue;
+                uint64_t hash = XXH3_64bits(data + i, containerSize);
+                if (!found.count(hash) && Find(hash) == nullptr)
+                    found.emplace(hash, std::vector<uint8_t>(data + i, data + i + containerSize));
+                i += (containerSize & ~size_t(3)) - 4;
+            }
+        }
+    }
+
+    void Init()
+    {
+        auto path = CachePath();
+        std::ifstream file(path, std::ios::binary);
+        CacheHeader header{};
+        if (file.read((char*)&header, sizeof(header)) && header.magic == CACHE_MAGIC && header.format == CACHE_FORMAT
+            && header.translatorVersion == shader_translator::Version())
+        {
+            std::vector<uint8_t> compressed((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+            std::vector<uint8_t> body(header.uncompressedSize);
+            size_t size = ZSTD_decompress(body.data(), body.size(), compressed.data(), compressed.size());
+            if (!ZSTD_isError(size) && size == body.size())
+            {
+                size_t offset = 0;
+                for (uint32_t i = 0; i < header.count && offset + 16 <= body.size(); i++)
+                {
+                    uint64_t hash;
+                    uint32_t mask, spirvSize;
+                    memcpy(&hash, body.data() + offset, 8);
+                    memcpy(&mask, body.data() + offset + 8, 4);
+                    memcpy(&spirvSize, body.data() + offset + 12, 4);
+                    offset += 16;
+                    if (offset + spirvSize > body.size())
+                        break;
+                    Insert(hash, std::vector<uint8_t>(body.begin() + offset, body.begin() + offset + spirvSize), mask);
+                    offset += spirvSize;
+                }
+                g_dataFingerprint = header.dataFingerprint;
+                LOGFN("Shaders: {} translated shaders in {}", g_shaders.size(), path.string());
+            }
+        }
+        else if (std::filesystem::exists(path))
+        {
+            LOGN("Shaders: the cache is from another translator version; it will be rebuilt");
+        }
+
+        std::thread(SaverThread).detach();
+    }
+
+    void Precache(const std::function<void(float)>& progress)
+    {
+        uint64_t fingerprint = DataFingerprint();
+        if (fingerprint == g_dataFingerprint)
+            return;
+
+        LOGN("Shaders: preparing the game's shaders (first run)...");
+        auto start = std::chrono::steady_clock::now();
+        progress(0.0f);
+
+        // Find every shader container: in the executable, then in each data package.
+        std::map<uint64_t, std::vector<uint8_t>> found;
+        Scan((const uint8_t*)g_memory.Translate(g_imageBase), g_imageSize, found);
+
+        std::vector<std::filesystem::path> packageFiles;
+        std::error_code ec;
+        for (const auto& entry : std::filesystem::directory_iterator(GetGamePath() / "lu", ec))
+        {
+            if (entry.path().extension() == ".lu")
+                packageFiles.push_back(entry.path());
+        }
+        std::sort(packageFiles.begin(), packageFiles.end());
+
+        for (size_t i = 0; i < packageFiles.size(); i++)
+        {
+            std::vector<uint8_t> contents;
+            if (packages::Read(packageFiles[i], contents))
+                Scan(contents.data(), contents.size(), found);
+            if ((i % 16) == 0)
+                progress(0.4f * float(i) / float(packageFiles.size()));
+        }
+
+        // Translate them on all cores.
+        std::vector<std::pair<uint64_t, std::vector<uint8_t>>> work(found.begin(), found.end());
+        std::atomic<size_t> next = 0, done = 0, failed = 0;
+        std::vector<std::thread> workers;
+        uint32_t threadCount = std::max(1u, std::thread::hardware_concurrency());
+        for (uint32_t t = 0; t < threadCount; t++)
+        {
+            workers.emplace_back([&]
+                {
+                    for (size_t index; (index = next++) < work.size();)
+                    {
+                        std::vector<uint8_t> spirv;
+                        uint32_t mask = 0;
+                        std::string error;
+                        if (shader_translator::Translate(work[index].second.data(), spirv, mask, error))
+                            Insert(work[index].first, std::move(spirv), mask);
+                        else
+                        {
+                            failed++;
+                            LOGFN_WARNING("Shaders: {:016x} could not be translated: {}", work[index].first, error);
+                        }
+                        done++;
+                    }
+                });
+        }
+        while (done < work.size())
+        {
+            progress(0.4f + 0.6f * (work.empty() ? 1.0f : float(done) / float(work.size())));
+            std::this_thread::sleep_for(std::chrono::milliseconds(33));
+        }
+        for (auto& worker : workers)
+            worker.join();
+        progress(1.0f);
+
+        {
+            std::lock_guard lock(g_mutex);
+            g_dataFingerprint = fingerprint;
+        }
+        Save();
+
+        auto seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        LOGFN("Shaders: translated {} shaders ({} failed) from {} packages in {:.1f} s", work.size() - failed, failed.load(),
+            packageFiles.size(), seconds);
+    }
+
+    const Shader* Find(uint64_t hash)
+    {
+        std::lock_guard lock(g_mutex);
+        auto it = g_shaders.find(hash);
+        return it != g_shaders.end() ? it->second.get() : nullptr;
+    }
+
+    void Ensure(const uint8_t* container, uint64_t hash)
+    {
+        if (container == nullptr || hash == 0 || Find(hash) != nullptr)
+            return;
+        std::vector<uint8_t> spirv;
+        uint32_t mask = 0;
+        std::string error;
+        if (shader_translator::Translate(container, spirv, mask, error))
+        {
+            Insert(hash, std::move(spirv), mask);
+            g_dirty = true;
+            LOGFN("Shaders: translated {:016x} on demand", hash);
+        }
+        else
+        {
+            LOGFN_WARNING("Shaders: {:016x} could not be translated: {}", hash, error);
+        }
+    }
+}
