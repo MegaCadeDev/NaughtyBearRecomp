@@ -2,19 +2,24 @@
 #include "heap.h"
 #include "memory.h"
 #include "function.h"
+#include <os/logger.h>
 
 // Guest address space layout (see kernel/memory.h):
 //   0x00020000-0x40000000  runtime heap: kernel objects, thread blocks, XAlloc
 //   0x40000000-0x7FEA0000  NtAllocateVirtualMemory, used by the game's own heaps
-//   0xA0000000-0xFFFFFFFF  physical memory (MmAllocatePhysicalMemoryEx)
+//   0xA0000000-0xC0000000  physical memory (MmAllocatePhysicalMemoryEx), 512 MB like the
+//                          console, so GPU addresses (the low 29 bits) map back uniquely
+//   0xC0000000-0xFFFFFFFF  physical overflow, used only if the 512 MB run out
 constexpr size_t USER_HEAP_BEGIN = 0x20000;
 constexpr size_t USER_HEAP_END = 0x40000000;
-constexpr size_t RESERVED_END = 0xA0000000;
+constexpr uint32_t PHYSICAL_BEGIN = 0xA0000000;
+constexpr uint32_t PHYSICAL_END = 0xC0000000;
 
 void Heap::Init()
 {
     heap = o1heapInit(g_memory.Translate(USER_HEAP_BEGIN), USER_HEAP_END - USER_HEAP_BEGIN);
-    physicalHeap = o1heapInit(g_memory.Translate(RESERVED_END), 0x100000000 - RESERVED_END);
+    physicalFree[PHYSICAL_BEGIN] = PHYSICAL_END - PHYSICAL_BEGIN;
+    physicalOverflowHeap = o1heapInit(g_memory.Translate(PHYSICAL_END), 0x100000000ull - PHYSICAL_END);
 }
 
 void* Heap::Alloc(size_t size)
@@ -31,21 +36,79 @@ void* Heap::AllocPhysical(size_t size, size_t alignment)
 
     std::lock_guard lock(physicalMutex);
 
-    void* ptr = o1heapAllocate(physicalHeap, size + alignment);
-    size_t aligned = ((size_t)ptr + alignment) & ~(alignment - 1);
+    uint32_t blockSize = uint32_t((size + 15) & ~size_t(15));
+    for (auto it = physicalFree.begin(); it != physicalFree.end(); ++it)
+    {
+        uint32_t start = it->first;
+        uint32_t freeSize = it->second;
+        uint32_t aligned = uint32_t((start + alignment - 1) & ~(alignment - 1));
+        if (uint64_t(aligned - start) + blockSize > freeSize)
+            continue;
 
+        physicalFree.erase(it);
+        if (aligned > start)
+            physicalFree[start] = aligned - start;
+        uint32_t end = aligned + blockSize;
+        if (end < start + freeSize)
+            physicalFree[end] = start + freeSize - end;
+
+        physicalAllocated[aligned] = blockSize;
+        return g_memory.Translate(aligned);
+    }
+
+    static bool warned = false;
+    if (!warned)
+    {
+        warned = true;
+        LOGN_WARNING("Physical memory: 512 MB exhausted, using the overflow heap (GPU addresses may alias)");
+    }
+
+    void* ptr = o1heapAllocate(physicalOverflowHeap, size + alignment);
+    size_t aligned = ((size_t)ptr + alignment) & ~(alignment - 1);
     *((void**)aligned - 1) = ptr;
     *((size_t*)aligned - 2) = size + O1HEAP_ALIGNMENT;
-
     return (void*)aligned;
 }
 
 void Heap::Free(void* ptr)
 {
-    if (ptr >= physicalHeap)
+    if (ptr == nullptr)
+        return;
+
+    uint32_t guest = g_memory.MapVirtual(ptr);
+    if (guest >= PHYSICAL_BEGIN && guest < PHYSICAL_END)
     {
         std::lock_guard lock(physicalMutex);
-        o1heapFree(physicalHeap, *((void**)ptr - 1));
+        auto it = physicalAllocated.find(guest);
+        if (it == physicalAllocated.end())
+            return;
+
+        uint32_t start = guest;
+        uint32_t size = it->second;
+        physicalAllocated.erase(it);
+
+        // Coalesce with the neighbouring free ranges.
+        auto next = physicalFree.lower_bound(start);
+        if (next != physicalFree.end() && next->first == start + size)
+        {
+            size += next->second;
+            next = physicalFree.erase(next);
+        }
+        if (next != physicalFree.begin())
+        {
+            auto previous = std::prev(next);
+            if (previous->first + previous->second == start)
+            {
+                previous->second += size;
+                return;
+            }
+        }
+        physicalFree[start] = size;
+    }
+    else if (guest >= PHYSICAL_END)
+    {
+        std::lock_guard lock(physicalMutex);
+        o1heapFree(physicalOverflowHeap, *((void**)ptr - 1));
     }
     else
     {
@@ -56,10 +119,18 @@ void Heap::Free(void* ptr)
 
 size_t Heap::Size(void* ptr)
 {
-    if (ptr)
-        return *((size_t*)ptr - 2) - O1HEAP_ALIGNMENT; // relies on fragment header in o1heap.c
+    if (ptr == nullptr)
+        return 0;
 
-    return 0;
+    uint32_t guest = g_memory.MapVirtual(ptr);
+    if (guest >= PHYSICAL_BEGIN && guest < PHYSICAL_END)
+    {
+        std::lock_guard lock(physicalMutex);
+        auto it = physicalAllocated.find(guest);
+        return it != physicalAllocated.end() ? it->second : 0;
+    }
+
+    return *((size_t*)ptr - 2) - O1HEAP_ALIGNMENT; // relies on fragment header in o1heap.c
 }
 
 uint32_t RtlAllocateHeap(uint32_t heapHandle, uint32_t flags, uint32_t size)

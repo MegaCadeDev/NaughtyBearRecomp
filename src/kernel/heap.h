@@ -1,14 +1,20 @@
 #pragma once
 
 #include "mutex.h"
+#include <map>
 
 struct Heap
 {
     Mutex mutex;
     O1HeapInstance* heap;
 
+    // Physical memory: exact-size first-fit ranges in 0xA0000000-0xC0000000, so every
+    // allocation has a unique GPU (29-bit physical) address, as on the console's 512 MB.
+    // Requests that don't fit fall back to an o1heap above it.
     Mutex physicalMutex;
-    O1HeapInstance* physicalHeap;
+    std::map<uint32_t, uint32_t> physicalFree;      // guest start -> size
+    std::map<uint32_t, uint32_t> physicalAllocated; // guest start -> size
+    O1HeapInstance* physicalOverflowHeap;
 
     void Init();
 

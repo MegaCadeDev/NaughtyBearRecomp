@@ -74,8 +74,27 @@ if (NB_TRACE_D3D)
         COMMENT "Generating Direct3D trace wrappers")
 endif()
 
+# The renderer's own shaders (copies for resolves and presentation), compiled to SPIR-V
+# headers with glslangValidator.
+find_program(GLSLANG_VALIDATOR glslangValidator REQUIRED)
+set(HOST_SHADER_DIR ${CMAKE_BINARY_DIR}/host_shaders)
+set(HOST_SHADER_HEADERS)
+foreach(shader blit.vert:g_blitVS blit.frag:g_blitPS)
+    string(REPLACE ":" ";" parts ${shader})
+    list(GET parts 0 file)
+    list(GET parts 1 name)
+    set(header ${HOST_SHADER_DIR}/${file}.h)
+    add_custom_command(
+        OUTPUT ${header}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${HOST_SHADER_DIR}
+        COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.1 --vn ${name} -o ${header} ${CMAKE_SOURCE_DIR}/src/gpu/shaders/${file}
+        DEPENDS ${CMAKE_SOURCE_DIR}/src/gpu/shaders/${file}
+        COMMENT "Compiling ${file}")
+    list(APPEND HOST_SHADER_HEADERS ${header})
+endforeach()
+
 # The runtime: ported from Unleashed Recompiled (GPL-3.0), see NOTICE.md.
-add_executable(NaughtyBear ${RUNTIME_SOURCES} ${IMPORT_STUBS} ${TRACE_WRAPPERS} ${SHADER_CACHE})
+add_executable(NaughtyBear ${RUNTIME_SOURCES} ${IMPORT_STUBS} ${TRACE_WRAPPERS} ${SHADER_CACHE} ${HOST_SHADER_HEADERS})
 if (NB_TRACE_D3D)
     target_compile_definitions(NaughtyBear PRIVATE NB_TRACE_D3D)
 endif()
@@ -84,6 +103,7 @@ target_include_directories(NaughtyBear PRIVATE
     src/gpu
     thirdparty/unordered_dense/include
     tools/XenonRecomp/thirdparty/xxHash
-    tools/XenosRecomp/thirdparty/zstd/lib)
+    tools/XenosRecomp/thirdparty/zstd/lib
+    ${HOST_SHADER_DIR})
 target_precompile_headers(NaughtyBear PRIVATE src/stdafx.h)
 target_link_libraries(NaughtyBear PRIVATE NaughtyBearRecompLib XenonUtils o1heap fmt::fmt xxHash::xxhash plume SDL2::SDL2 libzstd_static smolv)
