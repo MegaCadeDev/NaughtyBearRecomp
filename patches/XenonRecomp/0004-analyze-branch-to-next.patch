@@ -1,0 +1,16 @@
+diff --git a/XenonAnalyse/function.cpp b/XenonAnalyse/function.cpp
+index 34add40..50ea4e5 100644
+--- a/XenonAnalyse/function.cpp
++++ b/XenonAnalyse/function.cpp
+@@ -98,6 +98,11 @@ Function Function::Analyze(const void* code, size_t size, size_t base)
+                 continue;
+             }
+ 
++            if (PPC_BD(instruction) == 4) // branch to the next instruction, e.g. the last step of a bdz chain
++            {
++                continue;
++            }
++
+             // TODO: carry projections over to false
+             curBlock.projectedSize = -1;
+             blockStack.pop_back();
