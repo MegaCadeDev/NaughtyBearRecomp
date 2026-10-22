@@ -1,5 +1,16 @@
 #pragma once
 #include <xbox.h>
+#include "xdm.h"
+
+// Enumerators returned by XamContentCreateEnumerator and friends. Next returns the number
+// of items written, or -1 when there are none left.
+struct XamEnumeratorBase : KernelObject
+{
+    virtual uint32_t Next(void* buffer)
+    {
+        return -1;
+    }
+};
 
 #define MSGID(Area, Number) (uint32_t)((uint16_t)(Area) << 16 | (uint16_t)(Number))
 #define MSG_AREA(msgid)     (((msgid) >> 16) & 0xFFFF)

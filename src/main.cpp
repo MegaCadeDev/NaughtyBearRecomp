@@ -5,6 +5,7 @@
 #include <apu/audio.h>
 #include <cpu/guest_thread.h>
 #include <gpu/video.h>
+#include <hid/hid.h>
 #include <kernel/function.h>
 #include <kernel/heap.h>
 #include <kernel/memory.h>
@@ -136,7 +137,7 @@ int main(int argc, char** argv)
     }
 
     // SDL wants its window and events on the main thread, so the game gets its own.
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0)
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMECONTROLLER) != 0)
     {
         LOGFN_ERROR("SDL_Init failed: {}", SDL_GetError());
         return EXIT_FAILURE;
@@ -149,6 +150,8 @@ int main(int argc, char** argv)
         LOGFN_ERROR("Could not create the game window: {}", SDL_GetError());
         return EXIT_FAILURE;
     }
+
+    hid::Init();
 
     std::thread game([entry]
         {

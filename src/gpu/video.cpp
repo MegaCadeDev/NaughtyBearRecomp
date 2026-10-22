@@ -13,6 +13,7 @@
 #include <stdafx.h>
 #include <gpu/shader_cache.h>
 #include <gpu/video.h>
+#include <hid/hid.h>
 #include <kernel/memory.h>
 #include <os/logger.h>
 #include <plume_render_interface.h>
@@ -596,6 +597,7 @@ namespace
         static auto lastReport = std::chrono::steady_clock::now();
         presented++;
         g_presentedFrames = presented;
+        hid::OnFrame(presented);
         auto now = std::chrono::steady_clock::now();
         if (now - lastReport >= std::chrono::seconds(2))
         {

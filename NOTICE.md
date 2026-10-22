@@ -18,10 +18,12 @@ Files taken from it, with the changes made for Naughty Bear:
 | `src/os/logger.h` | Stub notices are logged once per call site in every build |
 | `src/kernel/function.h`, `memory.*`, `heap.h`, `xdm.*`, `freelist.h`, `xam.h`, `cpu/guest_stack_var.h`, `cpu/ppc_context.h`, `os/process.h`, `os/linux/*`, `apu/audio.*`, `mutex.h`, `framework.h`, `xxHashMap.h` | Unchanged |
 | `src/stdafx.h`, `src/main.cpp` | Rewritten for this project, following the originals |
+| `src/hid/hid.*` | Adapted from `hid/driver/sdl_hid.cpp`: single player 1, keyboard layout, scripted input |
 
 Files written for this project: `src/kernel/virtual_memory.cpp`, `src/kernel/io/nt_file.cpp`,
 `src/kernel/xnet.cpp`, `src/kernel/crt_format.cpp`, `src/kernel/xex_modules.*`,
-`src/apu/driver/null_driver.cpp`, `src/user/*`, `src/import_stub.*`, `src/gpu/*`.
+`src/apu/driver/null_driver.cpp`, `src/user/*`, `src/import_stub.*`, `src/gpu/*`,
+`src/kernel/xam_user.cpp`.
 
 ## Third-party code
 

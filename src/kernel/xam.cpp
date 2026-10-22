@@ -1,6 +1,8 @@
 #include <stdafx.h>
 #include "xam.h"
 #include "xdm.h"
+#include <hid/hid.h>
+#include "function.h"
 #include <cpu/guest_thread.h>
 #include <ranges>
 #include <unordered_set>
@@ -18,14 +20,6 @@ struct XamListener : KernelObject
 
     XamListener();
     ~XamListener();
-};
-
-struct XamEnumeratorBase : KernelObject
-{
-    virtual uint32_t Next(void* buffer)
-    {
-        return -1;
-    }
 };
 
 template<typename TIterator = std::vector<XHOSTCONTENT_DATA>::iterator>
@@ -379,20 +373,53 @@ uint32_t XamContentGetDeviceData(uint32_t DeviceID, XDEVICE_DATA* pDeviceData)
     return 0;
 }
 
-// Input comes later with Unleashed Recompiled's SDL-based hid layer; until then no
-// controller is connected.
+// Input: player 1 is the active SDL controller plus the keyboard (hid/hid.cpp). As in
+// Unleashed Recompiled, the structures are filled in host order and swapped here.
 uint32_t XamInputGetCapabilities(uint32_t unk, uint32_t userIndex, uint32_t flags, XAMINPUT_CAPABILITIES* caps)
 {
-    return ERROR_DEVICE_NOT_CONNECTED;
+    uint32_t result = hid::GetCapabilities(userIndex, caps);
+    if (result == ERROR_SUCCESS)
+    {
+        ByteSwapInplace(caps->Flags);
+        ByteSwapInplace(caps->Gamepad.wButtons);
+        ByteSwapInplace(caps->Gamepad.sThumbLX);
+        ByteSwapInplace(caps->Gamepad.sThumbLY);
+        ByteSwapInplace(caps->Gamepad.sThumbRX);
+        ByteSwapInplace(caps->Gamepad.sThumbRY);
+        ByteSwapInplace(caps->Vibration.wLeftMotorSpeed);
+        ByteSwapInplace(caps->Vibration.wRightMotorSpeed);
+    }
+    return result;
 }
 
 uint32_t XamInputGetState(uint32_t userIndex, uint32_t flags, XAMINPUT_STATE* state)
 {
-    memset(state, 0, sizeof(*state));
-    return ERROR_DEVICE_NOT_CONNECTED;
+    uint32_t result = hid::GetState(userIndex, state);
+    if (result == ERROR_SUCCESS)
+    {
+        ByteSwapInplace(state->dwPacketNumber);
+        ByteSwapInplace(state->Gamepad.wButtons);
+        ByteSwapInplace(state->Gamepad.sThumbLX);
+        ByteSwapInplace(state->Gamepad.sThumbLY);
+        ByteSwapInplace(state->Gamepad.sThumbRX);
+        ByteSwapInplace(state->Gamepad.sThumbRY);
+    }
+    return result;
 }
 
 uint32_t XamInputSetState(uint32_t userIndex, uint32_t flags, XAMINPUT_VIBRATION* vibration)
 {
-    return ERROR_DEVICE_NOT_CONNECTED;
+    if (vibration == nullptr)
+        return ERROR_BAD_ARGUMENTS;
+    XAMINPUT_VIBRATION host{ ByteSwap(vibration->wLeftMotorSpeed), ByteSwap(vibration->wRightMotorSpeed) };
+    return hid::SetState(userIndex, &host);
 }
+
+// No keyboard text entry (chatpad); there is never a keystroke pending.
+uint32_t XamInputGetKeystrokeEx(be<uint32_t>* userIndex, uint32_t flags, void* keystroke)
+{
+    constexpr uint32_t ERROR_EMPTY = 0x10D2;
+    return ERROR_EMPTY;
+}
+
+GUEST_FUNCTION_HOOK(__imp__XamInputGetKeystrokeEx, XamInputGetKeystrokeEx);
