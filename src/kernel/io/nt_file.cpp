@@ -393,6 +393,10 @@ uint32_t NtCreateFile(be<uint32_t>* fileHandle, uint32_t desiredAccess, XOBJECT_
         if (!exists)
             ForgetCachedPaths();
 
+        static const bool logFiles = getenv("NB_LOG_FILES") != nullptr;
+        if (logFiles)
+            LOGF_IMPL(Utility, "NtCreateFile", "\"{}\" -> {}", guestPath, path.string());
+
         auto* handle = CreateKernelObject<FileHandle>();
         handle->fd = fd;
         handle->path = path;

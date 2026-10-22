@@ -100,3 +100,22 @@ raises a 60 Hz vblank so the game runs its render loop without a GPU.
 Anchors come from kernel calls (`Vd*`, `MmAllocatePhysicalMemoryEx`), PM4 opcodes
 (e.g. `DRAW_INDX` 0x22, `DRAW_INDX_2` 0x36, `SET_CONSTANT` 0x2D, `EVENT_WRITE` 0x46)
 and argument shapes matching the XDK API.
+
+## Shaders
+
+The game's data is in compressed `.lu` packages (`lu/*.lu`, signature `x36`), so shaders
+are captured at runtime instead: with a tracing build, `NB_DUMP_SHADERS=shaders/dump`
+writes every shader container passed to the vertex/pixel shader constructors
+(`0x82F30050`, `0x82F2FF28`). They are standard XDK containers (magic `0x102A1100`;
+the microcode follows the virtual part, `virtualSize + physicalSize` bytes in all).
+
+`tools/translate_shaders.sh` runs XenosRecomp over the dump. Two patches
+(`patches/XenosRecomp/`) were needed:
+
+- Vertex input locations 16-18 for `BLENDWEIGHT1`-`3`, which Naughty Bear uses as extra
+  vertex data and Sonic Unleashed does not.
+- Boolean constant arrays, with pixel shader boolean registers addressed from 128.
+
+All 29 shaders seen on the start menu translate to SPIR-V. Shaders only appear once
+the game constructs them, so the dump grows as more of the game is played; decoding the
+`.lu` packages would capture them all up front.

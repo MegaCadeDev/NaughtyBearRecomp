@@ -1,0 +1,98 @@
+diff --git a/XenosRecomp/main.cpp b/XenosRecomp/main.cpp
+index d015145..017b64d 100644
+--- a/XenosRecomp/main.cpp
++++ b/XenosRecomp/main.cpp
+@@ -1,3 +1,4 @@
++#include <fstream>
+ #include "shader.h"
+ #include "shader_recompiler.h"
+ #include "dxc_compiler.h"
+@@ -123,6 +124,12 @@ int main(int argc, char** argv)
+                 recompiler = {};
+                 recompiler.recompile(shader.data, include);
+ 
++                // XENOS_DUMP_HLSL=dir writes each shader's HLSL there for debugging.
++                if (const char* dumpDir = getenv("XENOS_DUMP_HLSL"))
++                {
++                    std::ofstream(fmt::format("{}/{:016x}.hlsl", dumpDir, hashShaderPair.first)) << recompiler.out;
++                }
++
+                 shader.specConstantsMask = recompiler.specConstantsMask;
+ 
+                 thread_local DxcCompiler dxcCompiler;
+diff --git a/XenosRecomp/shader_recompiler.cpp b/XenosRecomp/shader_recompiler.cpp
+index 698a418..b8d02f1 100644
+--- a/XenosRecomp/shader_recompiler.cpp
++++ b/XenosRecomp/shader_recompiler.cpp
+@@ -94,6 +94,11 @@ static constexpr DeclUsageLocation USAGE_LOCATIONS[] =
+     { DeclUsage::TexCoord, 6, 14 },
+     { DeclUsage::TexCoord, 7, 15 },
+     { DeclUsage::Position, 1, 15 },
++    // Naughty Bear: extra blend weight channels used as vertex data. Locations 16+ need
++    // maxVertexInputAttributes > 16, which desktop Vulkan drivers provide (32 or more).
++    { DeclUsage::BlendWeight, 1, 16 },
++    { DeclUsage::BlendWeight, 2, 17 },
++    { DeclUsage::BlendWeight, 3, 18 },
+ };
+ 
+ static constexpr std::pair<DeclUsage, size_t> INTERPOLATORS[] =
+@@ -1255,7 +1260,13 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+         {
+             const char* constantName = reinterpret_cast<const char*>(constantTableData + constantInfo->name);
+             println("\t#define {} (1 << {})", constantName, constantInfo->registerIndex + (isPixelShader ? 16 : 0));
+-            boolConstants.emplace(constantInfo->registerIndex, constantName);
++
++            // Every element of a boolean array gets its own bit (Naughty Bear uses arrays).
++            for (uint32_t element = 0; element < std::max<uint32_t>(1, constantInfo->registerCount); element++)
++            {
++                uint32_t registerIndex = constantInfo->registerIndex + element;
++                boolConstants.emplace(registerIndex, fmt::format("(1 << {})", registerIndex + (isPixelShader ? 16 : 0)));
++            }
+         }
+     }
+ 
+@@ -1324,14 +1335,18 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+ 
+             out += '\t';
+ 
++            bool locationFound = false;
+             for (auto& usageLocation : USAGE_LOCATIONS)
+             {
+                 if (usageLocation.usage == vertexElement.usage && usageLocation.usageIndex == vertexElement.usageIndex)
+                 {
+                     print("[[vk::location({})]] ", usageLocation.location);
++                    locationFound = true;
+                     break;
+                 }
+             }
++            if (!locationFound)
++                fprintf(stderr, "no location for %s%u\n", USAGE_SEMANTICS[uint32_t(vertexElement.usage)], uint32_t(vertexElement.usageIndex));
+ 
+             println("in {0} i{1}{2} : {3}{2},", usageType, USAGE_VARIABLES[uint32_t(vertexElement.usage)],
+                 uint32_t(vertexElement.usageIndex), USAGE_SEMANTICS[uint32_t(vertexElement.usage)]);
+@@ -1694,7 +1709,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                     }
+                     else
+                     {
+-                        auto findResult = boolConstants.find(cfInstr.condJmp.boolAddress);
++                        // Pixel shaders address their boolean registers from 128.
++                        uint32_t boolRegister = uint32_t(cfInstr.condJmp.boolAddress);
++                        if (isPixelShader && boolRegister >= 128)
++                            boolRegister -= 128;
++                        auto findResult = boolConstants.find(boolRegister);
+                         if (findResult != boolConstants.end())
+                             println("if ((g_Booleans & {}) {}= 0)", findResult->second, cfInstr.condJmp.condition ^ simpleControlFlow ? "!" : "=");
+                         else
+diff --git a/XenosRecomp/shader_recompiler.h b/XenosRecomp/shader_recompiler.h
+index b2e317d..aeea1a6 100644
+--- a/XenosRecomp/shader_recompiler.h
++++ b/XenosRecomp/shader_recompiler.h
+@@ -29,7 +29,7 @@ struct ShaderRecompiler : StringBuffer
+     std::unordered_map<uint32_t, VertexElement> vertexElements;
+     std::unordered_map<uint32_t, std::string> interpolators;
+     std::unordered_map<uint32_t, const ConstantInfo*> float4Constants;
+-    std::unordered_map<uint32_t, const char*> boolConstants;
++    std::unordered_map<uint32_t, std::string> boolConstants; // register -> bit mask expression
+     std::unordered_map<uint32_t, const char*> samplers;
+     std::unordered_map<uint32_t, uint32_t> ifEndLabels;
+     uint32_t specConstantsMask = 0;

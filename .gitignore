@@ -15,3 +15,6 @@ out/
 
 # Runtime saves
 save/
+
+# Shaders dumped from the game (NB_DUMP_SHADERS)
+shaders/
