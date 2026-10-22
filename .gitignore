@@ -17,4 +17,4 @@ out/
 save/
 
 # Shaders dumped from the game (NB_DUMP_SHADERS)
-shaders/
+/shaders/
