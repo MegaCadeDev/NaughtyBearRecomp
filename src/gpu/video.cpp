@@ -48,6 +48,7 @@ extern "C" PPC_FUNC(__imp__sub_82F30188); // CreateVertexShader(container) -> ob
 extern "C" PPC_FUNC(__imp__sub_82F2FF60); // CreatePixelShader(container) -> object
 extern "C" PPC_FUNC(__imp__sub_82F38388); // D3DDevice_DrawVerticesUP
 extern "C" PPC_FUNC(__imp__sub_82F388E8); // D3DDevice_DrawIndexedVerticesUP
+extern "C" PPC_FUNC(__imp__sub_82F2C640); // D3DDevice_SetTexture
 
 namespace
 {
@@ -181,6 +182,7 @@ namespace
         }
     }
 
+
     struct VertexDeclaration
     {
         std::vector<RenderInputElement> inputElements;
@@ -238,6 +240,9 @@ namespace
     std::string g_screenshotPath;
     uint64_t g_screenshotFrame = 600;
     uint64_t g_frameNumber = 0;
+
+    // Texture objects bound per sampler (D3DDevice_SetTexture).
+    uint32_t g_samplerTextures[32]{};
 
     uint64_t g_drawsThisFrame = 0;
     uint64_t g_drawsSkippedThisFrame = 0;
@@ -513,6 +518,186 @@ namespace
         }
     }
 
+    // ---- Textures ----
+    //
+    // Texture objects carry the GPU texture fetch constant at +0x1C (six dwords, layout as
+    // documented by Xenia): dword0 type/pitch/tiled, dword1 format/endian/base address,
+    // dword2 size, dword3 swizzle, dword5 dimension. Textures are decoded from guest memory
+    // (untiled and endian-swapped) and cached by address and fetch constant.
+
+    constexpr uint32_t TEXTURE_FETCH_CONSTANT = 0x1C;
+
+    struct XenosFormatInfo
+    {
+        RenderFormat format;
+        uint32_t blockSize;  // texels per block side (1 or 4)
+        uint32_t bytesPerBlock;
+    };
+
+    // Xenos texture formats (Xenia's xenos::TextureFormat numbering).
+    bool GetXenosFormat(uint32_t format, XenosFormatInfo& info)
+    {
+        switch (format)
+        {
+        case 2:  info = { RenderFormat::R8_UNORM, 1, 1 }; return true;            // k_8
+        case 6:  info = { RenderFormat::R8G8B8A8_UNORM, 1, 4 }; return true;      // k_8_8_8_8
+        case 10: info = { RenderFormat::R8G8_UNORM, 1, 2 }; return true;          // k_8_8
+        case 18: info = { RenderFormat::BC1_UNORM, 4, 8 }; return true;           // k_DXT1
+        case 19: info = { RenderFormat::BC2_UNORM, 4, 16 }; return true;          // k_DXT2_3
+        case 20: info = { RenderFormat::BC3_UNORM, 4, 16 }; return true;          // k_DXT4_5
+        case 25: info = { RenderFormat::R16G16_UNORM, 1, 4 }; return true;        // k_16_16
+        case 31: info = { RenderFormat::R16G16_FLOAT, 1, 4 }; return true;        // k_16_16_FLOAT
+        case 32: info = { RenderFormat::R16G16B16A16_FLOAT, 1, 8 }; return true;  // k_16_16_16_16_FLOAT
+        case 36: info = { RenderFormat::R32_FLOAT, 1, 4 }; return true;           // k_32_FLOAT
+        case 49: info = { RenderFormat::BC5_UNORM, 4, 16 }; return true;          // k_DXN
+        case 50: info = { RenderFormat::R8G8B8A8_UNORM, 1, 4 }; return true;      // k_8_8_8_8_AS_16_16_16_16
+        case 51: info = { RenderFormat::BC1_UNORM, 4, 8 }; return true;           // k_DXT1_AS_16_16_16_16
+        case 52: info = { RenderFormat::BC2_UNORM, 4, 16 }; return true;          // k_DXT2_3_AS_16_16_16_16
+        case 53: info = { RenderFormat::BC3_UNORM, 4, 16 }; return true;          // k_DXT4_5_AS_16_16_16_16
+        default: return false;
+        }
+    }
+
+    // Block index of (x, y) in a tiled Xenos texture (the XDK's XGAddress2DTiledOffset).
+    uint32_t TiledBlockIndex(uint32_t x, uint32_t y, uint32_t widthInBlocks, uint32_t bytesPerBlock)
+    {
+        uint32_t alignedWidth = (widthInBlocks + 31) & ~31u;
+        uint32_t logBpp = (bytesPerBlock >> 2) + ((bytesPerBlock >> 1) >> (bytesPerBlock >> 2));
+        uint32_t macro = ((x >> 5) + (y >> 5) * (alignedWidth >> 5)) << (logBpp + 7);
+        uint32_t micro = ((x & 7) + ((y & 6) << 2)) << logBpp;
+        uint32_t offset = macro + ((micro & ~15u) << 1) + (micro & 15) + ((y & 8) << (3 + logBpp)) + ((y & 1) << 4);
+        return (((offset & ~511u) << 3) + ((offset & 448) << 2) + (offset & 63) + ((y & 16) << 7) + (((((y & 8) >> 2) + (x >> 3)) & 3) << 6)) >> logBpp;
+    }
+
+    void SwapEndian(uint8_t* data, uint32_t size, uint32_t endian)
+    {
+        switch (endian)
+        {
+        case 1: // 8 in 16
+            for (uint32_t i = 0; i + 1 < size; i += 2)
+                std::swap(data[i], data[i + 1]);
+            break;
+        case 2: // 8 in 32
+            for (uint32_t i = 0; i + 3 < size; i += 4)
+            {
+                std::swap(data[i], data[i + 3]);
+                std::swap(data[i + 1], data[i + 2]);
+            }
+            break;
+        case 3: // 16 in 32
+            for (uint32_t i = 0; i + 3 < size; i += 4)
+            {
+                std::swap(data[i], data[i + 2]);
+                std::swap(data[i + 1], data[i + 3]);
+            }
+            break;
+        }
+    }
+
+    RenderSwizzle ConvertSwizzle(uint32_t component)
+    {
+        switch (component)
+        {
+        case 0: return RenderSwizzle::R;
+        case 1: return RenderSwizzle::G;
+        case 2: return RenderSwizzle::B;
+        case 3: return RenderSwizzle::A;
+        case 4: return RenderSwizzle::ZERO;
+        default: return RenderSwizzle::ONE;
+        }
+    }
+
+    struct HostTexture
+    {
+        std::unique_ptr<RenderTexture> texture;
+        std::unique_ptr<RenderTextureView> view;
+        uint32_t descriptorIndex = 0;
+    };
+
+    ankerl::unordered_dense::map<uint64_t, HostTexture> g_textures;
+    uint32_t g_nextTextureDescriptor = NULL_COUNT;
+    std::set<uint32_t> g_unsupportedTextureFormats;
+
+    // Returns the descriptor index for the texture object, uploading it on first use.
+    uint32_t GetTextureDescriptor(uint32_t object)
+    {
+        if (object == 0)
+            return NULL_TEXTURE_2D;
+
+        uint32_t fetch[6];
+        for (uint32_t i = 0; i < 6; i++)
+            fetch[i] = Load32(object + TEXTURE_FETCH_CONSTANT + i * 4);
+
+        uint64_t key = XXH3_64bits(fetch, sizeof(fetch));
+        if (auto it = g_textures.find(key); it != g_textures.end())
+            return it->second.descriptorIndex;
+
+        uint32_t type = fetch[0] & 3;
+        uint32_t dimension = (fetch[5] >> 9) & 3;
+        uint32_t formatId = fetch[1] & 0x3F;
+        XenosFormatInfo info;
+        if (type != 2 || dimension != 1 || !GetXenosFormat(formatId, info))
+        {
+            if (g_unsupportedTextureFormats.insert(formatId | (dimension << 8)).second)
+                LOGF_WARNING("Texture format {} (dimension {}) not supported yet", formatId, dimension);
+            g_textures[key].descriptorIndex = NULL_TEXTURE_2D;
+            return NULL_TEXTURE_2D;
+        }
+
+        uint32_t address = fetch[1] & 0xFFFFF000;
+        uint32_t endian = (fetch[1] >> 6) & 3;
+        uint32_t width = (fetch[2] & 0x1FFF) + 1;
+        uint32_t height = ((fetch[2] >> 13) & 0x1FFF) + 1;
+        bool tiled = (fetch[0] >> 31) != 0;
+        uint32_t pitch = ((fetch[0] >> 22) & 0x1FF) * 32;
+        if (pitch == 0)
+            pitch = width;
+
+        uint32_t blocksWide = (width + info.blockSize - 1) / info.blockSize;
+        uint32_t blocksHigh = (height + info.blockSize - 1) / info.blockSize;
+        uint32_t pitchBlocks = std::max(pitch / info.blockSize, blocksWide);
+        uint64_t size = uint64_t(blocksWide) * blocksHigh * info.bytesPerBlock;
+
+        auto [memory, offset] = Allocate(size, 512);
+        if (memory == nullptr)
+            return NULL_TEXTURE_2D;
+
+        const uint8_t* source = (const uint8_t*)g_memory.Translate(address);
+        for (uint32_t by = 0; by < blocksHigh; by++)
+        {
+            for (uint32_t bx = 0; bx < blocksWide; bx++)
+            {
+                uint32_t sourceBlock = tiled ? TiledBlockIndex(bx, by, pitchBlocks, info.bytesPerBlock) : by * pitchBlocks + bx;
+                uint8_t* destination = memory + (uint64_t(by) * blocksWide + bx) * info.bytesPerBlock;
+                memcpy(destination, source + uint64_t(sourceBlock) * info.bytesPerBlock, info.bytesPerBlock);
+                SwapEndian(destination, info.bytesPerBlock, endian);
+            }
+        }
+
+        HostTexture host;
+        host.texture = g_device->createTexture(RenderTextureDesc::Texture2D(width, height, 1, info.format));
+        uint32_t swizzle = (fetch[3] >> 1) & 0xFFF;
+        RenderTextureViewDesc viewDesc = RenderTextureViewDesc::Texture2D(info.format);
+        viewDesc.mipLevels = 1;
+        viewDesc.componentMapping = RenderComponentMapping(ConvertSwizzle(swizzle & 7), ConvertSwizzle((swizzle >> 3) & 7),
+            ConvertSwizzle((swizzle >> 6) & 7), ConvertSwizzle((swizzle >> 9) & 7));
+        host.view = host.texture->createTextureView(viewDesc);
+
+        RenderTextureBarrier toCopy(host.texture.get(), RenderTextureLayout::COPY_DEST);
+        g_commandList->barriers(RenderBarrierStage::COPY, nullptr, 0, &toCopy, 1);
+        g_commandList->copyTextureRegion(RenderTextureCopyLocation::Subresource(host.texture.get()),
+            RenderTextureCopyLocation::PlacedFootprint(g_uploadBuffer.get(), info.format, width, height, 1, blocksWide * info.blockSize, offset));
+        RenderTextureBarrier toRead(host.texture.get(), RenderTextureLayout::SHADER_READ);
+        g_commandList->barriers(RenderBarrierStage::GRAPHICS, nullptr, 0, &toRead, 1);
+
+        host.descriptorIndex = g_nextTextureDescriptor++;
+        g_textureDescriptorSet->setTexture(host.descriptorIndex, host.texture.get(), RenderTextureLayout::SHADER_READ, host.view.get());
+        uint32_t descriptor = host.descriptorIndex;
+        g_textures[key] = std::move(host);
+        return descriptor;
+    }
+
+
     RenderPrimitiveTopology ConvertPrimitiveType(uint32_t type)
     {
         switch (type)
@@ -592,7 +777,7 @@ namespace
         SharedConstants shared{};
         for (uint32_t i = 0; i < 16; i++)
         {
-            shared.texture2DIndices[i] = NULL_TEXTURE_2D;
+            shared.texture2DIndices[i] = GetTextureDescriptor(g_samplerTextures[i]);
             shared.texture3DIndices[i] = NULL_TEXTURE_3D;
             shared.textureCubeIndices[i] = NULL_TEXTURE_CUBE;
             shared.samplerIndices[i] = 0;
@@ -918,4 +1103,16 @@ PPC_FUNC(sub_82F388E8)
     uint32_t vertexCount = ctx.r5.u32 + ctx.r6.u32; // indices are absolute, so upload from vertex 0
     DrawUP(ctx.r4.u32, ctx.r10.u32, vertexCount, stride, ctx.r8.u32, ctx.r7.u32, indexSize);
     __imp__sub_82F388E8(ctx, base);
+}
+
+// D3DDevice_SetTexture(dev, Sampler, pTexture, dirty bit).
+PPC_FUNC(sub_82F2C640)
+{
+    TRACE_ENTER(0x82F2C640);
+    uint32_t sampler = ctx.r4.u32;
+    uint32_t texture = ctx.r5.u32;
+    if (sampler < std::size(g_samplerTextures))
+        g_samplerTextures[sampler] = texture;
+
+    __imp__sub_82F2C640(ctx, base);
 }
