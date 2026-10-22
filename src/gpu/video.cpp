@@ -110,6 +110,8 @@ namespace
     enum : uint32_t
     {
         RB_COLOR_MASK = 0x2104,
+        RB_STENCILREFMASK_BF = 0x210C,
+        RB_STENCILREFMASK = 0x210D,
         RB_ALPHA_REF = 0x210E,
         PA_CL_VPORT_XSCALE = 0x210F,
         PA_CL_VPORT_XOFFSET = 0x2110,
@@ -1040,7 +1042,7 @@ namespace
         surface->width = pitch;
         surface->height = height;
         surface->isDepth = isDepth;
-        surface->format = isDepth ? RenderFormat::D32_FLOAT : ConvertColorTargetFormat(colorFormat);
+        surface->format = isDepth ? RenderFormat::D32_FLOAT_S8_UINT : ConvertColorTargetFormat(colorFormat);
         surface->texture = isDepth
             ? g_device->createTexture(RenderTextureDesc::DepthTarget(pitch, height, surface->format))
             : g_device->createTexture(RenderTextureDesc::ColorTarget(pitch, height, surface->format));
@@ -1298,6 +1300,14 @@ namespace
         }
     }
 
+    RenderStencilOp ConvertStencilOp(uint32_t operation)
+    {
+        constexpr RenderStencilOp operations[] = { RenderStencilOp::KEEP, RenderStencilOp::ZERO, RenderStencilOp::REPLACE,
+            RenderStencilOp::INCREMENT_AND_CLAMP, RenderStencilOp::DECREMENT_AND_CLAMP, RenderStencilOp::INVERT,
+            RenderStencilOp::INCREMENT_AND_WRAP, RenderStencilOp::DECREMENT_AND_WRAP };
+        return operations[operation & 7];
+    }
+
     RenderComparisonFunction ConvertCompare(uint32_t function)
     {
         constexpr RenderComparisonFunction functions[] = { RenderComparisonFunction::NEVER, RenderComparisonFunction::LESS,
@@ -1315,11 +1325,12 @@ namespace
         uint32_t blendControl = 0;
         uint32_t depthControl = 0;
         uint32_t colorMask = 0;
+        uint32_t stencilRefMask = 0;
+        uint32_t stencilRefMaskBack = 0;
         uint32_t specConstants = 0;
         RenderPrimitiveTopology topology = RenderPrimitiveTopology::UNKNOWN;
         RenderFormat colorFormat = RenderFormat::UNKNOWN;
         RenderFormat depthFormat = RenderFormat::UNKNOWN;
-        uint32_t pad = 0;
     };
 
     RenderPipeline* GetPipeline(const PipelineKey& key, RenderShader* vertexShader, RenderShader* pixelShader, const VertexDeclaration& declaration)
@@ -1348,6 +1359,30 @@ namespace
             desc.depthEnabled = !noDepth && (key.depthControl & 2) != 0;
             desc.depthWriteEnabled = desc.depthEnabled && (key.depthControl & 4) != 0;
             desc.depthFunction = ConvertCompare((key.depthControl >> 4) & 7);
+
+            // RB_DEPTHCONTROL: stencil enable bit 0, back face stencil bit 7, front function
+            // and fail/pass/depth-fail operations from bit 8, back face ones from bit 20.
+            // RB_STENCILREFMASK: reference bits 0-7, mask 8-15, write mask 16-23.
+            desc.stencilEnabled = (key.depthControl & 1) != 0;
+            if (desc.stencilEnabled)
+            {
+                uint32_t control = key.depthControl;
+                desc.stencilFrontFace.compareFunction = ConvertCompare((control >> 8) & 7);
+                desc.stencilFrontFace.failOp = ConvertStencilOp((control >> 11) & 7);
+                desc.stencilFrontFace.passOp = ConvertStencilOp((control >> 14) & 7);
+                desc.stencilFrontFace.depthFailOp = ConvertStencilOp((control >> 17) & 7);
+                desc.stencilBackFace = desc.stencilFrontFace;
+                if ((control & 0x80) != 0)
+                {
+                    desc.stencilBackFace.compareFunction = ConvertCompare((control >> 20) & 7);
+                    desc.stencilBackFace.failOp = ConvertStencilOp((control >> 23) & 7);
+                    desc.stencilBackFace.passOp = ConvertStencilOp((control >> 26) & 7);
+                    desc.stencilBackFace.depthFailOp = ConvertStencilOp((control >> 29) & 7);
+                }
+                desc.stencilReference = key.stencilRefMask & 0xFF;
+                desc.stencilReadMask = (key.stencilRefMask >> 8) & 0xFF;
+                desc.stencilWriteMask = (key.stencilRefMask >> 16) & 0xFF;
+            }
         }
 
         if (key.colorFormat != RenderFormat::UNKNOWN)
@@ -1566,7 +1601,7 @@ namespace
             g_commandList->clearColor(0, color);
         }
         if (clearDepth && g_boundDepth != nullptr)
-            g_commandList->clearDepthStencil(true, false, depth, stencil);
+            g_commandList->clearDepthStencil(true, true, depth, stencil & 0xFF);
     }
 
     // D3DRESOLVE flags: render target index in bits 0-1, depth/stencil bit 2, clear the
@@ -1672,8 +1707,19 @@ namespace
             if (vs == g_shaderHashes.end() || ps == g_shaderHashes.end())
             {
                 static int reported = 0;
-                if (reported++ < 10)
-                    LOGF_WARNING("Unknown shader objects: vs {:08X} ps {:08X}", Load32(g_guestDevice + DEVICE_VERTEX_SHADER), Load32(g_guestDevice + DEVICE_PIXEL_SHADER));
+                if (reported++ < 3)
+                {
+                    uint32_t object = Load32(g_guestDevice + DEVICE_VERTEX_SHADER);
+                    std::string words;
+                    for (uint32_t i = 0; i < 24 && object != 0; i++)
+                        words += fmt::format(" {:08X}", Load32(object + i * 4));
+                    LOGF_WARNING("Unknown shader objects: vs {:08X} ps {:08X}:{}", object, Load32(g_guestDevice + DEVICE_PIXEL_SHADER), words);
+                    uint32_t known = g_shaderHashes.begin()->first;
+                    words.clear();
+                    for (uint32_t i = 0; i < 24; i++)
+                        words += fmt::format(" {:08X}", Load32(known + i * 4));
+                    LOGF_WARNING("A known shader object {:08X}:{}", known, words);
+                }
                 return Skip("no vertex or pixel shader bound");
             }
             vsHash = vs->second;
@@ -1844,6 +1890,11 @@ namespace
         key.blendControl = Reg(RB_BLENDCONTROL0);
         key.depthControl = Reg(RB_DEPTHCONTROL);
         key.colorMask = Reg(RB_COLOR_MASK) & 0xF;
+        if ((key.depthControl & 1) != 0)
+        {
+            key.stencilRefMask = Reg(RB_STENCILREFMASK) & 0xFFFFFF;
+            key.stencilRefMaskBack = Reg(RB_STENCILREFMASK_BF) & 0xFFFFFF;
+        }
         uint32_t alphaFunction = colorControl & 7;
         if ((colorControl & 8) != 0 && alphaFunction != 7 && (GetSpecConstantsMask(psHash) & SPEC_CONSTANT_ALPHA_TEST) != 0)
         {
