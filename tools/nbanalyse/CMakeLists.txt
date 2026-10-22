@@ -35,3 +35,6 @@ target_link_libraries(callgraph PRIVATE XenonUtils fmt::fmt)
 
 add_executable(xrefs xrefs.cpp)
 target_link_libraries(xrefs PRIVATE XenonUtils fmt::fmt)
+
+add_executable(pm4scan pm4scan.cpp)
+target_link_libraries(pm4scan PRIVATE XenonUtils fmt::fmt)

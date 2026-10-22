@@ -829,12 +829,6 @@ uint32_t KiApcNormalRoutineNop()
     return 0;
 }
 
-uint32_t VdEnableRingBufferRPtrWriteBack()
-{
-    LOG_UTILITY("!!! STUB !!!");
-    return 0;
-}
-
 uint32_t VdInitializeRingBuffer()
 {
     LOG_UTILITY("!!! STUB !!!");
@@ -886,12 +880,6 @@ uint32_t VdGetCurrentDisplayInformation()
 }
 
 uint32_t VdSetDisplayMode()
-{
-    LOG_UTILITY("!!! STUB !!!");
-    return 0;
-}
-
-uint32_t VdSetGraphicsInterruptCallback()
 {
     LOG_UTILITY("!!! STUB !!!");
     return 0;
@@ -1518,15 +1506,23 @@ void KeInitializeSemaphore(XKSEMAPHORE* semaphore, uint32_t count, uint32_t limi
     auto* object = QueryKernelObject<Semaphore>(semaphore->Header);
 }
 
-uint32_t XMAReleaseContext()
+uint32_t XMAReleaseContext(uint32_t context)
 {
-    LOG_UTILITY("!!! STUB !!!");
+    if (context != 0)
+        g_userHeap.Free(g_memory.Translate(context));
     return 0;
 }
 
-uint32_t XMACreateContext()
+// XMA hardware decoder contexts. The game programs them through guest memory; decoding is
+// not implemented yet, so contexts are just zeroed storage the game can safely write.
+uint32_t XMACreateContext(be<uint32_t>* contextOut)
 {
-    LOG_UTILITY("!!! STUB !!!");
+    if (contextOut == nullptr)
+        return 0xC000000D; // STATUS_INVALID_PARAMETER
+    constexpr size_t XMA_CONTEXT_SIZE = 64;
+    void* context = g_userHeap.AllocPhysical(XMA_CONTEXT_SIZE, 256);
+    memset(context, 0, XMA_CONTEXT_SIZE);
+    *contextOut = g_memory.MapVirtual(context);
     return 0;
 }
 
@@ -1619,7 +1615,6 @@ GUEST_FUNCTION_HOOK(__imp__VdGetSystemCommandBuffer, VdGetSystemCommandBuffer);
 GUEST_FUNCTION_HOOK(__imp__KeReleaseSpinLockFromRaisedIrql, KeReleaseSpinLockFromRaisedIrql);
 GUEST_FUNCTION_HOOK(__imp__KeAcquireSpinLockAtRaisedIrql, KeAcquireSpinLockAtRaisedIrql);
 GUEST_FUNCTION_HOOK(__imp__KiApcNormalRoutineNop, KiApcNormalRoutineNop);
-GUEST_FUNCTION_HOOK(__imp__VdEnableRingBufferRPtrWriteBack, VdEnableRingBufferRPtrWriteBack);
 GUEST_FUNCTION_HOOK(__imp__VdInitializeRingBuffer, VdInitializeRingBuffer);
 GUEST_FUNCTION_HOOK(__imp__MmGetPhysicalAddress, MmGetPhysicalAddress);
 GUEST_FUNCTION_HOOK(__imp__VdSetSystemCommandBufferGpuIdentifierAddress, VdSetSystemCommandBufferGpuIdentifierAddress);
@@ -1628,7 +1623,6 @@ GUEST_FUNCTION_HOOK(__imp__VdShutdownEngines, VdShutdownEngines);
 GUEST_FUNCTION_HOOK(__imp__VdQueryVideoMode, VdQueryVideoMode);
 GUEST_FUNCTION_HOOK(__imp__VdGetCurrentDisplayInformation, VdGetCurrentDisplayInformation);
 GUEST_FUNCTION_HOOK(__imp__VdSetDisplayMode, VdSetDisplayMode);
-GUEST_FUNCTION_HOOK(__imp__VdSetGraphicsInterruptCallback, VdSetGraphicsInterruptCallback);
 GUEST_FUNCTION_HOOK(__imp__VdInitializeEngines, VdInitializeEngines);
 GUEST_FUNCTION_HOOK(__imp__VdIsHSIOTrainingSucceeded, VdIsHSIOTrainingSucceeded);
 GUEST_FUNCTION_HOOK(__imp__VdGetCurrentDisplayGamma, VdGetCurrentDisplayGamma);

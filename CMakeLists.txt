@@ -40,8 +40,23 @@ add_custom_command(
 add_library(o1heap STATIC thirdparty/o1heap/o1heap.c)
 target_include_directories(o1heap PUBLIC thirdparty/o1heap)
 
+# NB_TRACE_D3D: log the game's calls into its Direct3D library (docs/d3d_map.md).
+option(NB_TRACE_D3D "Trace calls into the game's Direct3D library" OFF)
+set(TRACE_WRAPPERS)
+if (NB_TRACE_D3D)
+    set(TRACE_WRAPPERS ${CMAKE_BINARY_DIR}/d3d_trace_wrappers.cpp)
+    add_custom_command(
+        OUTPUT ${TRACE_WRAPPERS}
+        COMMAND ${CMAKE_SOURCE_DIR}/tools/gen_trace_wrappers.py ${GENERATED_DIR}/ppc_func_mapping.cpp ${TRACE_WRAPPERS} 82F1C000 82F50000
+        DEPENDS ${CMAKE_SOURCE_DIR}/tools/gen_trace_wrappers.py ${GENERATED_DIR}/ppc_func_mapping.cpp
+        COMMENT "Generating Direct3D trace wrappers")
+endif()
+
 # The runtime: ported from Unleashed Recompiled (GPL-3.0), see NOTICE.md.
-add_executable(NaughtyBear ${RUNTIME_SOURCES} ${IMPORT_STUBS})
+add_executable(NaughtyBear ${RUNTIME_SOURCES} ${IMPORT_STUBS} ${TRACE_WRAPPERS})
+if (NB_TRACE_D3D)
+    target_compile_definitions(NaughtyBear PRIVATE NB_TRACE_D3D)
+endif()
 target_include_directories(NaughtyBear PRIVATE
     src
     thirdparty/unordered_dense/include
