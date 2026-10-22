@@ -34,6 +34,8 @@ Confidence: **high** = arguments match exactly; **likely** = consistent but unve
 | `0x82F38988` | `D3DDevice_DrawVertices` | high | (dev, PrimitiveType, StartVertex, VertexCount); flushes dirty state and constants first |
 | `0x82F38D78` | `D3DDevice_DrawIndexedVertices` | high | (dev, PrimitiveType, BaseVertexIndex, StartIndex, IndexCount); same flush |
 | `0x82F38388` | `D3DDevice_DrawVerticesUP` | high | (dev, 4, VertexCount 0x120, pVertexStreamZeroData, Stride 0x1C) |
+| `0x82F37EF0` | `D3DDevice_BeginVertices` | high | (dev, PrimitiveType, VertexCount, Stride) -> pointer into the command buffer; particles fill it, then `0x82F37EE0` (`EndVertices`) |
+| `0x82F383D0` | `D3DDevice_BeginIndexedVertices` | high | (dev, PrimitiveType, -MinVertexIndex, NumVertices, IndexCount, IndexDataFormat, Stride, ppIndexData, ppVertexData on the stack) -> HRESULT |
 | `0x82F388E8` | `D3DDevice_DrawIndexedVerticesUP` | high | (dev, PrimitiveType, MinVertexIndex, NumVertices 12, IndexCount 30, pIndexData, IndexDataFormat, pVertexStreamZeroData, Stride on the stack); copies both into the command buffer through `0x82F383D0` |
 | `0x82F37138` | `D3DDevice_BeginTiling` | high | (dev, Flags, Count, pTileRects, pClearColor, ClearZ in f1, ClearStencil in r9). The game renders with predicated tiling; Sonic does not, so this is a new hook (a clear on PC) |
 | `0x82F37798` | `D3DDevice_EndTiling` | high | (dev, ResolveFlags, pResolveRects, pDestTexture, pClearColor, ...); the destination is then passed to Swap (a resolve copy on PC) |
@@ -123,7 +125,9 @@ Patches to XenosRecomp (`patches/XenosRecomp/`) for Naughty Bear:
   `BLENDINDICES1`-`3`, 22-24 for the second normal/tangent/binormal and 25-26 for
   `COLOR2`-`3` (the runtime's table in `src/gpu/video.cpp` must match).
 - Inputs a shader fetches more than once are declared once; fetches indexed by a computed
-  register (bone palettes) read the stream directly (`vfetchIndexed`).
+  register (bone palettes, particles) read the stream directly (`vfetchIndexed`).
+- Vertex shaders start with the vertex index in r0.x, as on the GPU (particles build their
+  quads from it).
 - Boolean constant arrays, with pixel shader boolean registers addressed from 128.
 - A shader that fails to compile is reported and left out instead of aborting.
 

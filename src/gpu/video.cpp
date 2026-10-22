@@ -1984,7 +1984,7 @@ namespace
         g_commandList->setVertexBuffers(DUMMY_SLOT, &dummyView, 1, &dummySlot);
         RenderIndexBufferView indexView(g_uploadBuffer->at(indexOffset), uint32_t(indices.size() * 4), RenderFormat::R32_UINT);
         g_commandList->setIndexBuffer(&indexView);
-        g_commandList->drawIndexedInstanced(uint32_t(indices.size()), 1, 0, call.userPointer ? 0 : call.baseVertex, 0);
+        g_commandList->drawIndexedInstanced(uint32_t(indices.size()), 1, 0, call.baseVertex, 0);
         g_drawsThisFrame++;
     }
 
@@ -2317,36 +2317,90 @@ PPC_FUNC(sub_82F38D78)
     __imp__sub_82F38D78(ctx, base);
 }
 
-// D3DDevice_DrawVerticesUP(dev, PrimitiveType, VertexCount, pVertexStreamZeroData, VertexStreamZeroStride).
-PPC_FUNC(sub_82F38388)
+// Draws from vertices the game writes into the command buffer: BeginVertices /
+// BeginIndexedVertices return pointers to fill, and the draw is made at EndVertices. The
+// game uses these directly (particles, such as fire) as well as through DrawVerticesUP and
+// DrawIndexedVerticesUP, which call Begin*, copy the data and end the draw inline.
+extern "C" PPC_FUNC(__imp__sub_82F37EF0); // D3DDevice_BeginVertices
+extern "C" PPC_FUNC(__imp__sub_82F383D0); // D3DDevice_BeginIndexedVertices
+extern "C" PPC_FUNC(__imp__sub_82F37EE0); // D3DDevice_EndVertices
+
+namespace
 {
-    TRACE_ENTER(0x82F38388);
+    std::optional<DrawCall> g_pendingVertices;
+
+    void DrawPendingVertices()
+    {
+        if (g_pendingVertices)
+        {
+            DrawCall call = *g_pendingVertices;
+            g_pendingVertices.reset();
+            Draw(call);
+        }
+    }
+}
+
+// D3DDevice_BeginVertices(dev, PrimitiveType, VertexCount, VertexStreamZeroStride) -> vertex pointer.
+PPC_FUNC(sub_82F37EF0)
+{
     DrawCall call;
     call.primitiveType = ctx.r4.u32;
     call.count = ctx.r5.u32;
     call.userPointer = true;
-    call.vertexData = ctx.r6.u32;
     call.vertexCount = ctx.r5.u32;
-    call.vertexStride = ctx.r7.u32;
-    Draw(call);
-    __imp__sub_82F38388(ctx, base);
+    call.vertexStride = ctx.r6.u32;
+    __imp__sub_82F37EF0(ctx, base);
+    g_pendingVertices.reset();
+    if (ctx.r3.u32 != 0)
+    {
+        call.vertexData = ctx.r3.u32;
+        g_pendingVertices = call;
+    }
 }
 
-// D3DDevice_DrawIndexedVerticesUP(dev, PrimitiveType, MinVertexIndex, NumVertices, IndexCount,
-//     pIndexData, IndexDataFormat, pVertexStreamZeroData, VertexStreamZeroStride (stack)).
+// D3DDevice_BeginIndexedVertices(dev, PrimitiveType, BaseVertexIndex, NumVertices, IndexCount,
+//     IndexDataFormat, VertexStreamZeroStride, ppIndexData, ppVertexData (stack)) -> HRESULT.
+PPC_FUNC(sub_82F383D0)
+{
+    DrawCall call;
+    call.primitiveType = ctx.r4.u32;
+    call.baseVertex = int32_t(ctx.r5.u32); // -MinVertexIndex: the vertices start at MinVertexIndex
+    call.vertexCount = ctx.r6.u32;
+    call.count = ctx.r7.u32;
+    call.indexed = true;
+    call.indexSize = (ctx.r8.u32 & 4) ? 4 : 2;
+    call.vertexStride = ctx.r9.u32;
+    call.userPointer = true;
+    uint32_t indexPointer = ctx.r10.u32;
+    uint32_t vertexPointer = Load32(ctx.r1.u32 + 0x54);
+    __imp__sub_82F383D0(ctx, base);
+    g_pendingVertices.reset();
+    if (ctx.r3.u32 == 0 && indexPointer != 0 && vertexPointer != 0)
+    {
+        call.indexData = Load32(indexPointer);
+        call.vertexData = Load32(vertexPointer);
+        g_pendingVertices = call;
+    }
+}
+
+// D3DDevice_EndVertices(dev): the vertices are written; draw them.
+PPC_FUNC(sub_82F37EE0)
+{
+    DrawPendingVertices();
+    __imp__sub_82F37EE0(ctx, base);
+}
+
+// D3DDevice_DrawVerticesUP / DrawIndexedVerticesUP: Begin*, copy, and the end inline.
+PPC_FUNC(sub_82F38388)
+{
+    TRACE_ENTER(0x82F38388);
+    __imp__sub_82F38388(ctx, base);
+    DrawPendingVertices();
+}
+
 PPC_FUNC(sub_82F388E8)
 {
     TRACE_ENTER(0x82F388E8);
-    DrawCall call;
-    call.primitiveType = ctx.r4.u32;
-    call.indexed = true;
-    call.count = ctx.r7.u32;
-    call.userPointer = true;
-    call.indexData = ctx.r8.u32;
-    call.indexSize = (ctx.r9.u32 & 4) ? 4 : 2;
-    call.vertexData = ctx.r10.u32;
-    call.vertexCount = ctx.r5.u32 + ctx.r6.u32; // indices are absolute, so upload from vertex 0
-    call.vertexStride = Load32(ctx.r1.u32 + 0x54);
-    Draw(call);
     __imp__sub_82F388E8(ctx, base);
+    DrawPendingVertices();
 }

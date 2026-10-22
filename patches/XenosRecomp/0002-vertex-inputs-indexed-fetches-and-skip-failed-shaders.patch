@@ -177,6 +177,29 @@
          #ifdef UNLEASHED_RECOMP
              if ((vertexElement.usage == DeclUsage::TexCoord && vertexElement.usageIndex == 2 && isMetaInstancer) ||
                  (vertexElement.usage == DeclUsage::Position && vertexElement.usageIndex == 1))
+@@ -1360,6 +1432,10 @@
+             out += "\tin uint iVertexId : SV_VertexID,\n";
+             out += "\tin uint iInstanceId : SV_InstanceID,\n";
+         }
++    #else
++        // Xenos vertex shaders start with the vertex index in r0.x (Naughty Bear's particles
++        // build their quads from it).
++        out += "\tin uint iVertexId : SV_VertexID,\n";
+     #endif
+ 
+         out += "\tout float4 oPos : SV_Position";
+@@ -1486,6 +1562,11 @@
+             {
+                 out += "float4(iVertexId + g_IndexCount.x * iInstanceId, 0.0, 0.0, 0.0);\n";
+             }
++        #else
++            else if (!isPixelShader && i == 0)
++            {
++                out += "float4(float(iVertexId), 0.0, 0.0, 0.0);\n";
++            }
+         #endif
+             else
+             {
 --- a/XenosRecomp/shader_recompiler.h
 +++ b/XenosRecomp/shader_recompiler.h
 @@ -33,6 +33,9 @@
