@@ -269,6 +269,41 @@ namespace
     const bool g_noBlend = getenv("NB_NO_BLEND") != nullptr;
     uint64_t g_presentedFrames = 0;
 
+    // Frame pacing. On the console, Swap waits for the vertical blank at 60 Hz, as many
+    // times as the device's PresentationInterval says (Naughty Bear asks for 2: 30 fps).
+    // Here the swap chain follows the host display's refresh rate instead, so frames are
+    // paced to the console's rate explicitly. NB_FPS overrides it.
+    constexpr uint32_t D3DPRESENT_PARAMETERS_INTERVAL = 13 * 4;
+    constexpr uint32_t D3DPRESENT_INTERVAL_IMMEDIATE = 0x80000000;
+    std::chrono::nanoseconds g_framePeriod = std::chrono::nanoseconds(1000000000 / 60);
+    std::chrono::steady_clock::time_point g_nextFrame;
+
+    void SetPresentationInterval(uint32_t interval)
+    {
+        double fps = 60.0;
+        if (interval == D3DPRESENT_INTERVAL_IMMEDIATE)
+            fps = 0.0;
+        else if (interval >= 1 && interval <= 4)
+            fps = 60.0 / interval;
+        if (const char* overrideFps = getenv("NB_FPS"))
+            fps = std::atof(overrideFps);
+
+        g_framePeriod = fps > 0.0 ? std::chrono::nanoseconds(int64_t(1e9 / fps)) : std::chrono::nanoseconds(0);
+        LOGFN("Video: presentation interval {}, pacing frames to {:.1f} fps", interval, fps);
+    }
+
+    void PaceFrame()
+    {
+        if (g_framePeriod.count() == 0)
+            return;
+        auto now = std::chrono::steady_clock::now();
+        if (g_nextFrame.time_since_epoch().count() == 0 || now - g_nextFrame > g_framePeriod * 2)
+            g_nextFrame = now; // first frame, or fell far behind: don't try to catch up
+        else
+            std::this_thread::sleep_until(g_nextFrame);
+        g_nextFrame += g_framePeriod;
+    }
+
     uint64_t g_drawsThisFrame = 0;
     uint64_t g_drawsSkippedThisFrame = 0;
 
@@ -533,6 +568,7 @@ namespace
         RenderCommandSemaphore* wait[] = { g_acquireSemaphore.get() };
         RenderCommandSemaphore* signal[] = { g_renderSemaphore.get() };
         g_queue->executeCommandLists(lists, 1, acquired ? wait : nullptr, acquired ? 1 : 0, acquired ? signal : nullptr, acquired ? 1 : 0, g_fence.get());
+        PaceFrame();
         if (acquired)
             g_swapChain->present(index, signal, 1);
         g_queue->waitForCommandFence(g_fence.get());
@@ -1113,6 +1149,8 @@ void Video::OnWindowResized()
 PPC_FUNC(sub_82F26FA0)
 {
     uint32_t deviceOut = ctx.r8.u32;
+    if (uint32_t params = ctx.r7.u32)
+        SetPresentationInterval(Load32(params + D3DPRESENT_PARAMETERS_INTERVAL));
     TRACE_ENTER(0x82F26FA0);
     __imp__sub_82F26FA0(ctx, base);
     TRACE_LEAVE(0x82F26FA0);
