@@ -13,6 +13,9 @@ namespace hid
     uint32_t SetState(uint32_t userIndex, XAMINPUT_VIBRATION* vibration);
     uint32_t GetCapabilities(uint32_t userIndex, XAMINPUT_CAPABILITIES* capabilities);
 
+    // Applies requested rumble; call regularly on the main thread.
+    void Update();
+
     // Called once per presented frame; drives NB_INPUT_SCRIPT.
     void OnFrame(uint64_t frame);
 }

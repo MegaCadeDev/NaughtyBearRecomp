@@ -28,6 +28,19 @@ namespace
     std::array<Controller, 4> g_controllers;
     Controller* g_activeController = nullptr;
     std::set<SDL_Scancode> g_keysDown;
+
+    // Rumble requested by the game, applied on the main thread by hid::Update. The game's
+    // threads must not call SDL's joystick functions while holding g_inputMutex: SDL
+    // holds its joystick lock while it calls the event watch, which takes g_inputMutex.
+    struct PendingRumble
+    {
+        bool pending = false;
+        bool stopAll = false;
+        SDL_JoystickID id = -1;
+        uint16_t low = 0;
+        uint16_t high = 0;
+    };
+    PendingRumble g_rumble;
     uint32_t g_packetNumber = 0;
 
     // NB_INPUT_SCRIPT="start@300+5,a@600+5": hold a button from a frame for a number of
@@ -278,9 +291,9 @@ namespace
             if (event->window.event == SDL_WINDOWEVENT_FOCUS_LOST)
             {
                 g_keysDown.clear();
-                for (auto& c : g_controllers)
-                    if (c.controller != nullptr)
-                        SDL_GameControllerRumble(c.controller, 0, 0, 0);
+                g_rumble = {};
+                g_rumble.pending = true;
+                g_rumble.stopAll = true;
             }
             break;
         }
@@ -308,6 +321,35 @@ void hid::Init()
             OpenController(i);
     }
     LoadInputScript();
+}
+
+void hid::Update()
+{
+    PendingRumble rumble;
+    std::vector<SDL_JoystickID> open;
+    {
+        std::lock_guard lock(g_inputMutex);
+        rumble = g_rumble;
+        g_rumble.pending = false;
+        if (rumble.pending && rumble.stopAll)
+            for (const auto& c : g_controllers)
+                if (c.controller != nullptr)
+                    open.push_back(c.id);
+    }
+    if (!rumble.pending)
+        return;
+
+    // Controllers are only closed on this thread, so these stay valid here.
+    if (rumble.stopAll)
+    {
+        for (SDL_JoystickID id : open)
+            if (SDL_GameController* controller = SDL_GameControllerFromInstanceID(id))
+                SDL_GameControllerRumble(controller, 0, 0, 0);
+    }
+    else if (SDL_GameController* controller = SDL_GameControllerFromInstanceID(rumble.id))
+    {
+        SDL_GameControllerRumble(controller, rumble.low, rumble.high, VIBRATION_TIMEOUT_MS);
+    }
 }
 
 void hid::OnFrame(uint64_t frame)
@@ -344,7 +386,13 @@ uint32_t hid::SetState(uint32_t userIndex, XAMINPUT_VIBRATION* vibration)
 
     std::lock_guard lock(g_inputMutex);
     if (g_activeController != nullptr)
-        SDL_GameControllerRumble(g_activeController->controller, vibration->wLeftMotorSpeed, vibration->wRightMotorSpeed, VIBRATION_TIMEOUT_MS);
+    {
+        g_rumble.pending = true;
+        g_rumble.stopAll = false;
+        g_rumble.id = g_activeController->id;
+        g_rumble.low = vibration->wLeftMotorSpeed;
+        g_rumble.high = vibration->wRightMotorSpeed;
+    }
     return ERROR_SUCCESS;
 }
 

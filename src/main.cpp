@@ -239,12 +239,21 @@ int main(int argc, char** argv)
         });
     game.detach();
 
-    for (SDL_Event event; SDL_WaitEvent(&event);)
+    // Events, and rumble requests (applied here: SDL's joystick calls belong on this thread).
+    for (bool running = true; running;)
     {
-        if (event.type == SDL_QUIT)
-            break;
-        if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
-            Video::OnWindowResized();
+        SDL_Event event;
+        if (SDL_WaitEventTimeout(&event, 8))
+        {
+            do
+            {
+                if (event.type == SDL_QUIT)
+                    running = false;
+                if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
+                    Video::OnWindowResized();
+            } while (SDL_PollEvent(&event));
+        }
+        hid::Update();
     }
 
     // The game has no orderly shutdown path yet.
