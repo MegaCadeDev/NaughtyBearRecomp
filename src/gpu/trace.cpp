@@ -11,6 +11,11 @@ void HeadlessGpuOnDeviceCreated(uint32_t device);
 namespace
 {
     constexpr uint32_t CREATE_DEVICE = 0x82F26FA0;
+    constexpr uint32_t SWAP = 0x82F33D50;
+
+    // NB_TRACE_FRAME=N logs every call made during the Nth frame (frames end at Swap).
+    const int64_t g_dumpFrame = [] { const char* v = getenv("NB_TRACE_FRAME"); return v ? std::atoll(v) : -1; }();
+    std::atomic<int64_t> g_frame = 0;
     constexpr int CALLS_LOGGED_PER_FUNCTION = 6;
 
     Mutex g_traceMutex;
@@ -32,7 +37,14 @@ void nb::trace::Enter(uint32_t function, const PPCContext& ctx)
         std::lock_guard lock(g_traceMutex);
         count = ++g_counts[function];
     }
-    if (count <= CALLS_LOGGED_PER_FUNCTION)
+    bool dumping = g_frame == g_dumpFrame;
+    if (function == SWAP)
+    {
+        int64_t frame = g_frame++;
+        if (frame == g_dumpFrame || frame + 1 == g_dumpFrame)
+            LOGF_IMPL(Utility, "d3d", "---- frame {} ----", frame + 1);
+    }
+    if (count <= CALLS_LOGGED_PER_FUNCTION || dumping)
     {
         LOGF_IMPL(Utility, "d3d", "{:08X}({:08X}, {:08X}, {:08X}, {:08X}, {:08X}, {:08X}) f1={} lr={:08X}", function,
             ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, ctx.r8.u32, ctx.f1.f64, lr);
