@@ -33,7 +33,6 @@ Known issues:
 - A few depth-only draws per frame (probably shadow casters) are skipped: their vertex
   shaders are created by a path that isn't hooked yet.
 - Some texture formats (3D and cube textures among them) aren't decoded yet.
-- The window is a fixed 1280x720.
 - Online features are offline: the game reports no Xbox LIVE connection.
 
 ## Running
@@ -49,6 +48,10 @@ the program:
 It finds `Default.xex` in a `game` folder next to the executable, in the working directory,
 or in a parent of the executable's folder. A path to the game can also be given on the
 command line.
+
+The window can be resized (or maximized); the game renders at 1280x720 and is scaled to
+fit, keeping its aspect ratio. Pressing the controller's Guide (Xbox) button closes the
+game.
 
 On the first run the game prepares its shaders: it decompresses its data packages, finds
 every shader and translates them all while a progress bar is shown (a few seconds). They're
@@ -73,6 +76,7 @@ keyboard also controls player 1:
 | LB / RB | Q / Tab |
 | LT / RT | Z / C |
 | Start / Back | Enter / Escape |
+| Guide (closes the game) | (close the window) |
 | Left / right stick click | Left Shift / V |
 
 ### Options
@@ -84,6 +88,7 @@ Set as environment variables:
 | `NB_VOLUME=0..1` | Audio volume |
 | `NB_SURROUND=1` | Ask for 5.1 audio output (stereo otherwise) |
 | `NB_FPS=n` | Pace frames to `n` fps instead of the game's 30 |
+| `NB_WINDOW_SIZE=WxH` | Starting window size (default 1280x720) |
 
 Debugging:
 

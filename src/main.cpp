@@ -219,9 +219,15 @@ int main(int argc, char** argv)
         LOGFN_ERROR("SDL_Init failed: {}", SDL_GetError());
         return EXIT_FAILURE;
     }
-    // Fixed 1280x720 until the renderer scales its output to the window.
-    SDL_Window* window = SDL_CreateWindow("Naughty Bear", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720,
-        SDL_WINDOW_VULKAN);
+    // The game renders at 1280x720; the renderer scales that to the window.
+    // NB_WINDOW_SIZE=WxH sets the starting size.
+    int windowWidth = 1280, windowHeight = 720;
+    if (const char* size = getenv("NB_WINDOW_SIZE"))
+        sscanf(size, "%dx%d", &windowWidth, &windowHeight);
+    SDL_Window* window = SDL_CreateWindow("Naughty Bear", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+        std::max(windowWidth, 320), std::max(windowHeight, 180), SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+    if (window != nullptr)
+        SDL_SetWindowMinimumSize(window, 320, 180);
     if (window == nullptr || !Video::Init(window))
     {
         LOGFN_ERROR("Could not create the game window: {}", SDL_GetError());

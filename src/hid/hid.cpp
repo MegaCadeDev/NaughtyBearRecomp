@@ -263,6 +263,16 @@ namespace
             }
             break;
         case SDL_CONTROLLERBUTTONDOWN:
+            // The Guide (Xbox) button closes the game.
+            if (event->cbutton.button == SDL_CONTROLLER_BUTTON_GUIDE && FindController(event->cbutton.which) != nullptr)
+            {
+                LOGN("Input: Guide button pressed, closing the game");
+                SDL_Event quit{};
+                quit.type = SDL_QUIT;
+                SDL_PeepEvents(&quit, 1, SDL_ADDEVENT, 0, 0);
+                break;
+            }
+            [[fallthrough]];
         case SDL_CONTROLLERBUTTONUP:
         case SDL_CONTROLLERAXISMOTION:
             if (Controller* c = FindController(event->cdevice.which))

@@ -310,9 +310,12 @@ namespace
     std::unique_ptr<RenderSampler> g_fixedSamplers[SAMPLER_FIXED_COUNT];
     std::unique_ptr<RenderShader> g_blitVertexShader;
     std::unique_ptr<RenderShader> g_blitPixelShader;
-    // What is presented: the front buffer is copied here, then to the swap chain.
+    // What is presented: the front buffer is copied here, then scaled to the window.
     std::unique_ptr<RenderTexture> g_presentTarget;
     std::unique_ptr<RenderFramebuffer> g_presentFramebuffer;
+    uint32_t g_presentDescriptor = 0;
+    std::vector<std::unique_ptr<RenderFramebuffer>> g_swapChainFramebuffers;
+    std::atomic<bool> g_resizeRequested = false;
     std::unique_ptr<RenderBuffer> g_uploadBuffer;
     uint8_t* g_uploadMemory = nullptr;
     uint64_t g_uploadAddress = 0;
@@ -1456,8 +1459,15 @@ namespace
     // one of the game's frames (pacing, statistics, scripted input).
     void SubmitPresentTarget(bool gameFrame)
     {
+        // The window may have been resized (frames are synchronous, so nothing is in flight).
+        if (g_resizeRequested.exchange(false) || g_swapChain->needsResize())
+        {
+            g_swapChain->resize();
+            g_swapChainFramebuffers.clear();
+        }
+
         uint32_t index = 0;
-        bool acquired = g_swapChain->getWidth() == PRESENT_WIDTH && g_swapChain->getHeight() == PRESENT_HEIGHT
+        bool acquired = !g_swapChain->isEmpty() && g_swapChain->getWidth() > 0 && g_swapChain->getHeight() > 0
             && g_swapChain->acquireTexture(g_acquireSemaphore.get(), &index);
 
         bool screenshot = gameFrame && !g_screenshotPath.empty() && ++g_frameNumber == g_screenshotFrame;
@@ -1472,13 +1482,33 @@ namespace
 
         if (acquired)
         {
+            // Scale the 1280x720 image to the window, keeping its aspect ratio (black bars).
             RenderTexture* backBuffer = g_swapChain->getTexture(index);
-            RenderTextureBarrier toCopy[] = {
-                RenderTextureBarrier(g_presentTarget.get(), RenderTextureLayout::COPY_SOURCE),
-                RenderTextureBarrier(backBuffer, RenderTextureLayout::COPY_DEST),
+            RenderTextureBarrier barriers[] = {
+                RenderTextureBarrier(g_presentTarget.get(), RenderTextureLayout::SHADER_READ),
+                RenderTextureBarrier(backBuffer, RenderTextureLayout::COLOR_WRITE),
             };
-            g_commandList->barriers(RenderBarrierStage::COPY, nullptr, 0, toCopy, 2);
-            g_commandList->copyTexture(backBuffer, g_presentTarget.get());
+            g_commandList->barriers(RenderBarrierStage::GRAPHICS, nullptr, 0, barriers, 2);
+
+            if (g_swapChainFramebuffers.size() <= index)
+                g_swapChainFramebuffers.resize(index + 1);
+            if (!g_swapChainFramebuffers[index])
+            {
+                const RenderTexture* target = backBuffer;
+                g_swapChainFramebuffers[index] = g_device->createFramebuffer(RenderFramebufferDesc(&target, 1));
+            }
+            g_commandList->setFramebuffer(g_swapChainFramebuffers[index].get());
+            g_framebufferBound = false;
+            g_commandList->clearColor(0, RenderColor(0.0f, 0.0f, 0.0f, 1.0f));
+
+            float windowWidth = float(g_swapChain->getWidth());
+            float windowHeight = float(g_swapChain->getHeight());
+            float scale = std::min(windowWidth / PRESENT_WIDTH, windowHeight / PRESENT_HEIGHT);
+            float width = std::max(1.0f, std::floor(PRESENT_WIDTH * scale));
+            float height = std::max(1.0f, std::floor(PRESENT_HEIGHT * scale));
+            RenderViewport viewport(std::floor((windowWidth - width) / 2), std::floor((windowHeight - height) / 2), width, height, 0.0f, 1.0f);
+            Blit(BACKBUFFER_FORMAT, g_presentDescriptor, SAMPLER_LINEAR_CLAMP, 0.0f, 0.0f, 1.0f, 1.0f, viewport);
+
             RenderTextureBarrier toPresent(backBuffer, RenderTextureLayout::PRESENT);
             g_commandList->barriers(RenderBarrierStage::NONE, nullptr, 0, &toPresent, 1);
         }
@@ -1509,8 +1539,6 @@ namespace
             LOGFN("Video: saved frame {} to {}", g_frameNumber, g_screenshotPath);
         }
 
-        if (!acquired && g_swapChain->needsResize())
-            g_swapChain->resize();
         g_inFrame = false;
         g_frameIndex++;
         if ((g_frameIndex % 64) == 0)
@@ -2133,6 +2161,8 @@ bool Video::Init(SDL_Window* window)
     g_presentTarget = g_device->createTexture(RenderTextureDesc::ColorTarget(PRESENT_WIDTH, PRESENT_HEIGHT, BACKBUFFER_FORMAT));
     const RenderTexture* target = g_presentTarget.get();
     g_presentFramebuffer = g_device->createFramebuffer(RenderFramebufferDesc(&target, 1));
+    g_presentDescriptor = AllocateTextureDescriptor();
+    g_textureDescriptorSet->setTexture(g_presentDescriptor, g_presentTarget.get(), RenderTextureLayout::SHADER_READ);
 
     g_uploadBuffer = g_device->createBuffer(RenderBufferDesc::UploadBuffer(UPLOAD_BUFFER_SIZE,
         RenderBufferFlag::CONSTANT | RenderBufferFlag::VERTEX | RenderBufferFlag::INDEX));
@@ -2157,6 +2187,7 @@ bool Video::Init(SDL_Window* window)
 
 void Video::OnWindowResized()
 {
+    g_resizeRequested = true;
 }
 
 // Direct3D_CreateDevice: let the guest create its device, then hand it to the headless GPU.
