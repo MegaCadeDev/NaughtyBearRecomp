@@ -202,9 +202,10 @@ static std::filesystem::path FindGameExecutable()
 int main(int argc, char** argv)
 {
 #if defined(__PROSPERO__)
-    // The log goes to a file the player can read over FTP.
+    // The log goes to a file the player can read over FTP. The game folder is created too, so
+    // there's a place to copy the game's files to.
     std::error_code directoryError;
-    std::filesystem::create_directories(PS5_USER_PATH, directoryError);
+    std::filesystem::create_directories(PS5_USER_PATH / "game", directoryError);
     freopen((PS5_USER_PATH / "log.txt").c_str(), "w", stdout);
     dup2(fileno(stdout), fileno(stderr));
 #endif
@@ -236,7 +237,7 @@ int main(int argc, char** argv)
         if (xexPath.empty())
         {
 #if defined(__PROSPERO__)
-            Fail("Could not find the game: put its files (with Default.xex) in /data/NaughtyBearRecomp/game.");
+            Fail("Could not find the game: copy its files (the folder with Default.xex) into /data/NaughtyBearRecomp/game.");
 #else
             Fail("Could not find the game: put its files (with Default.xex) in a \"game\" folder next to the executable.");
 #endif
