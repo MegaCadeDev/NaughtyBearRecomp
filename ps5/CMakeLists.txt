@@ -1,8 +1,8 @@
 # The PS5 version: compiles the recompiled game, the runtime and their libraries with the
 # PS5 payload SDK's toolchain into static libraries. ps5/tools/build.sh configures this, then
-# links them with RADV into the title's eboot.bin and signs it (a native title, not a
-# payload, so the final link isn't CMake's). No mods, mods menu or shader translator: the
-# shader cache comes from the PC version.
+# links them with RADV and DXC (built by tools/build-dxc.sh) into the title's eboot.bin and
+# signs it (a native title, not a payload, so the final link isn't CMake's). No mods or mods
+# menu.
 cmake_minimum_required(VERSION 3.20)
 project(NaughtyBearPS5 C CXX)
 
@@ -88,6 +88,33 @@ foreach(shader blit.vert:g_blitVS blit.frag:g_blitPS)
     list(APPEND HOST_SHADER_HEADERS ${header})
 endforeach()
 
+# The shader translator, as the PC version builds it (see the main CMakeLists.txt): XenosRecomp's
+# recompiler and DXC, with the same HLSL header and version, so the PS5 translates shaders
+# itself and its cache matches the PC version's.
+set(XENOS_DIR ${ROOT}/tools/XenosRecomp/XenosRecomp)
+set(SHADER_COMMON_TEXT ${CMAKE_BINARY_DIR}/translator/shader_common_text.h)
+file(READ ${XENOS_DIR}/shader_common.h SHADER_COMMON_CONTENTS)
+file(GLOB TRANSLATOR_PATCHES ${ROOT}/patches/XenosRecomp/*.patch)
+set(TRANSLATOR_PATCH_CONTENTS "")
+foreach(patch ${TRANSLATOR_PATCHES})
+    file(READ ${patch} contents)
+    string(APPEND TRANSLATOR_PATCH_CONTENTS "${contents}")
+endforeach()
+string(SHA1 TRANSLATOR_PATCH_HASH "${TRANSLATOR_PATCH_CONTENTS}")
+file(WRITE ${SHADER_COMMON_TEXT}.tmp "#pragma once\nstatic const char SHADER_COMMON_TEXT[] = R\"NBHLSL(${SHADER_COMMON_CONTENTS})NBHLSL\";\nstatic const char TRANSLATOR_PATCH_HASH[] = \"${TRANSLATOR_PATCH_HASH}\";\n")
+configure_file(${SHADER_COMMON_TEXT}.tmp ${SHADER_COMMON_TEXT} COPYONLY)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${XENOS_DIR}/shader_common.h ${TRANSLATOR_PATCHES})
+
+add_library(nb_shader_translator STATIC
+    ${ROOT}/src/gpu/translator/shader_translator.cpp
+    ${XENOS_DIR}/shader_recompiler.cpp
+    ${XENOS_DIR}/dxc_compiler.cpp)
+target_include_directories(nb_shader_translator PRIVATE ${XENOS_DIR} ${CMAKE_BINARY_DIR}/translator ${ROOT}/src
+    ${ROOT}/tools/XenosRecomp/thirdparty/dxc-bin/inc ${ROOT}/tools/XenosRecomp/thirdparty/zstd/lib)
+target_precompile_headers(nb_shader_translator PRIVATE ${XENOS_DIR}/pch.h)
+target_compile_options(nb_shader_translator PRIVATE -fms-extensions)
+target_link_libraries(nb_shader_translator PRIVATE nb_thirdparty)
+
 # The runtime, without the PC-only parts (they compile to nothing on the PS5 anyway).
 file(GLOB_RECURSE RUNTIME_SOURCES CONFIGURE_DEPENDS ${ROOT}/src/*.cpp)
 list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "src/gpu/fallback/|src/gpu/translator/|src/mods/|src/ui/")
@@ -105,5 +132,5 @@ target_include_directories(nb_runtime PRIVATE
     ${DEPS}/ffmpeg/include
     ${HOST_SHADER_DIR})
 target_compile_definitions(nb_runtime PRIVATE NB_HAVE_FFMPEG)
-target_link_libraries(nb_runtime PUBLIC nb_recomp nb_thirdparty nb_plume)
+target_link_libraries(nb_runtime PUBLIC nb_recomp nb_thirdparty nb_plume nb_shader_translator)
 target_precompile_headers(nb_runtime PRIVATE ${ROOT}/src/stdafx.h)

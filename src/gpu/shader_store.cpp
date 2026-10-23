@@ -1,17 +1,8 @@
 #include <stdafx.h>
 #include "shader_store.h"
 #include "shader_cache_file.h"
-#if defined(__PROSPERO__)
-// No translator on the PS5 (it needs DXC): shaders come from the PC version's cache.
-namespace shader_translator
-{
-    inline size_t ContainerSize(const uint8_t*, size_t) { return 0; }
-    inline bool Translate(const uint8_t*, std::vector<uint8_t>&, uint32_t&, std::string& error) { error = "no translator"; return false; }
-    inline uint64_t Version() { return 0; }
-}
-#else
 #include <gpu/translator/shader_translator.h>
-#endif
+#include <cpu/guest_thread.h>
 #include <kernel/memory.h>
 #include <kernel/packages.h>
 #include <os/logger.h>
@@ -40,16 +31,6 @@ namespace shader_store
         {
             return GetSavePath(false).parent_path() / "cache" / "shaders.bin";
         }
-
-#if defined(__PROSPERO__)
-        // The PS5 can't translate shaders (the translator needs DXC): it uses the cache the PC
-        // version built from the same game files, packaged with the title (its cache folder
-        // is the title's own).
-        std::filesystem::path FindCache()
-        {
-            return CachePath();
-        }
-#endif
 
         uint64_t DataFingerprint()
         {
@@ -94,16 +75,12 @@ namespace shader_store
 
     void Init()
     {
-#if defined(__PROSPERO__)
-        auto path = FindCache();
-#else
         auto path = CachePath();
-#endif
         uint64_t translatorVersion = shader_translator::Version();
         std::ifstream file(path, std::ios::binary);
         CacheHeader header{};
         if (file.read((char*)&header, sizeof(header)) && header.magic == CACHE_MAGIC && header.format == CACHE_FORMAT
-            && (translatorVersion == 0 || header.translatorVersion == translatorVersion))
+            && header.translatorVersion == translatorVersion)
         {
             std::vector<uint8_t> compressed((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
             std::vector<uint8_t> body(header.uncompressedSize);
@@ -133,19 +110,11 @@ namespace shader_store
             LOGN("Shaders: the cache is from another translator version; it will be rebuilt");
         }
 
-#if defined(__PROSPERO__)
-        if (g_shaders.empty())
-            LOGFN_ERROR("Shaders: no shader cache at {}; build it with the PC version from the same game files (see ps5/README.md)", path.string());
-#else
         std::thread(SaverThread).detach();
-#endif
     }
 
     void Precache(const std::function<void(float)>& progress)
     {
-#if defined(__PROSPERO__)
-        return; // the cache comes from the PC version
-#endif
         uint64_t fingerprint = DataFingerprint();
         if (fingerprint == g_dataFingerprint)
             return;
@@ -176,14 +145,15 @@ namespace shader_store
                 progress(0.4f * float(i) / float(packageFiles.size()));
         }
 
-        // Translate them on all cores.
+        // Translate them on all cores, on threads with big stacks (DXC recurses deeply, and
+        // the PS5's default thread stacks are small).
         std::vector<std::pair<uint64_t, std::vector<uint8_t>>> work(found.begin(), found.end());
         std::atomic<size_t> next = 0, done = 0, failed = 0;
-        std::vector<std::thread> workers;
+        std::atomic<uint32_t> finishedWorkers = 0;
         uint32_t threadCount = std::max(1u, std::thread::hardware_concurrency());
         for (uint32_t t = 0; t < threadCount; t++)
         {
-            workers.emplace_back([&]
+            StartHostThread([&]
                 {
                     for (size_t index; (index = next++) < work.size();)
                     {
@@ -199,15 +169,14 @@ namespace shader_store
                         }
                         done++;
                     }
+                    finishedWorkers++;
                 });
         }
-        while (done < work.size())
+        while (finishedWorkers < threadCount)
         {
             progress(0.4f + 0.6f * (work.empty() ? 1.0f : float(done) / float(work.size())));
             std::this_thread::sleep_for(std::chrono::milliseconds(33));
         }
-        for (auto& worker : workers)
-            worker.join();
         progress(1.0f);
 
         {
@@ -232,10 +201,6 @@ namespace shader_store
     {
         if (container == nullptr || hash == 0 || Find(hash) != nullptr)
             return;
-#if defined(__PROSPERO__)
-        LOGFN_WARNING("Shaders: {:016x} isn't in the shader cache", hash);
-        return;
-#endif
         std::vector<uint8_t> spirv;
         uint32_t mask = 0;
         std::string error;

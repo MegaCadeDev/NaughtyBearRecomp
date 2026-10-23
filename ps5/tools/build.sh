@@ -2,12 +2,12 @@
 # Builds the PS5 version: a native homebrew title in dist/<TITLE_ID>, ready to copy to the
 # console's /data/homebrew/<TITLE_ID>.
 #
-#   1. dependencies: the PS5 payload SDK, PacBrew ports, RADV and FFmpeg (into ps5/.deps);
+#   1. dependencies: the PS5 payload SDK, PacBrew ports, RADV, FFmpeg and DXC (into ps5/.deps);
 #   2. the game and runtime, compiled with ps5/CMakeLists.txt;
 #   3. the link with RADV and the PS5 libc shims (tools/radv-link.sh), then the conversion
 #      and signing into eboot.bin with the native app tool (tooling/native);
-#   4. the title folder: eboot.bin, sce_sys (param.json, icon), sce_module/libc.prx, and the
-#      shader cache the PC version built, if there is one.
+#   4. the title folder: eboot.bin, sce_sys (param.json, icon) and sce_module/libc.prx. The
+#      title translates the game's shaders itself on first boot, as the PC version does.
 #
 # Adapted from UnleashedRecomp-Prospero's tools/build.sh (GPL-3.0), itself built on
 # BlackBearReloaded's ps5-native-app-boilerplate.
@@ -46,6 +46,7 @@ fi
 [[ -f $RADV_ARCHIVE ]] || MESON="$DEPS/tools-venv/bin/meson" PATH="$DEPS/tools-venv/bin:$PATH" bash "$ROOT/tools/build-radv.sh" release
 bash "$ROOT/tools/build-ffmpeg.sh"
 export PS5_PAYLOAD_SDK="$SDK_ROOT"
+bash "$ROOT/tools/build-dxc.sh"
 
 echo "==> [2/4] Compiling the game and runtime"
 [[ -f $REPO/generated/ppc/ppc_func_mapping.cpp ]] || { echo "No recompiled code in generated/ppc: run tools/recompile.sh first." >&2; exit 2; }
@@ -78,14 +79,17 @@ done
 source "$ROOT/tools/radv-link.sh"
 radv_link_recipe "$ROOT" "$SDK_ROOT" "$RADV_ARCHIVE"
 # The runtime's PPC_FUNC overrides replace the generated code's weak definitions, so both
-# libraries go in whole.
+# libraries go in whole. DXC initialises itself in a constructor (DllMain) that nothing
+# refers to, as it's built to be a shared library: it's kept with --undefined.
 "$SDK_ROOT/bin/prospero-lld" "${radv_linker_script[@]}" --eh-frame-hdr "${radv_link_flags[@]}" \
     --version-script "$NATIVE/app-symbols.map" --exclude-libs=ALL \
+    --undefined=_Z7DllMainv \
     -e _start -o "$BUILD/naughtybear.elf" \
     "$OBJ/app_crt.o" "$OBJ/nb-libc-extra.o" \
     --whole-archive "$BUILD/cmake/libnb_runtime.a" "$BUILD/cmake/libnb_recomp.a" --no-whole-archive \
-    "$BUILD/cmake/libnb_plume.a" "$BUILD/cmake/libnb_thirdparty.a" \
-    --start-group "$FFMPEG/lib/libavcodec.a" "$FFMPEG/lib/libavutil.a" "$PACBREW/lib/libzstd.a" --end-group \
+    "$BUILD/cmake/libnb_plume.a" "$BUILD/cmake/libnb_shader_translator.a" "$BUILD/cmake/libnb_thirdparty.a" \
+    --start-group "$FFMPEG/lib/libavcodec.a" "$FFMPEG/lib/libavutil.a" "$PACBREW/lib/libzstd.a" \
+    "$DEPS"/dxc/lib/*.a --end-group \
     "$BUILD/stubs/libSceAgc.so" "$BUILD/stubs/libSceAgcDriver.so" \
     "${radv_link_inputs[@]}" \
     --as-needed "$SDK_ROOT"/target/lib/*.so
@@ -104,13 +108,5 @@ mkdir -p "$DIST/game"
 printf 'Copy the game'"'"'s files here: the folder with Default.xex, lu/, streams/ and the rest.\n' > "$DIST/game/PUT_GAME_FILES_HERE.txt"
 [[ -f $ROOT/runtime/libc.prx ]] || bash "$ROOT/tools/rebuild-libc.sh"
 cp "$ROOT/runtime/libc.prx" "$DIST/sce_module/libc.prx"
-# The shader cache comes from the PC version, built from the same game files (it's derived
-# from the game, so it's never committed or distributed: it stays on this machine).
-if [[ -f $REPO/cache/shaders.bin ]]; then
-    mkdir -p "$DIST/cache"
-    cp "$REPO/cache/shaders.bin" "$DIST/cache/shaders.bin"
-else
-    echo "warning: no cache/shaders.bin: run the PC version once first, or the PS5 version will have no shaders" >&2
-fi
 "$NATIVE_TOOL" self --inspect --file "$DIST/eboot.bin" > /dev/null
 printf 'Built %s (eboot.bin %s bytes)\n' "$DIST" "$(stat -c %s "$DIST/eboot.bin")"

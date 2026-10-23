@@ -8,7 +8,7 @@ It's a homebrew title for a jailbroken console, not a retail package. It include
 files: you need your own copy of the Xbox 360 game, as for the PC version. Mods aren't
 supported on the PS5.
 
-**Status:** builds; not yet tested on a console.
+**Status:** boots on a console; in testing.
 
 ## What you need
 
@@ -19,9 +19,8 @@ supported on the PS5.
 
 ## Building
 
-1. Build and run the PC version once with your game files (see the main README). Its first
-   run translates the game's shaders into `cache/shaders.bin`; the PS5 can't translate
-   shaders itself, so it uses that cache.
+1. Set up the PC build and recompile the game (see the main README): the PS5 version uses
+   the same recompiled code in `generated/`. You don't need to run the PC version.
 2. Build the PS5 version:
 
    ```bash
@@ -29,8 +28,8 @@ supported on the PS5.
    ```
 
    The first build downloads and builds its dependencies into `ps5/.deps` (the PS5 payload
-   SDK, the PacBrew ports, RADV from PS5 Mesa, FFmpeg's XMA decoder), which takes a while.
-   The title is in `ps5/dist/PPSA99862`, with the shader cache from step 1.
+   SDK, the PacBrew ports, RADV from PS5 Mesa, FFmpeg's XMA decoder and Microsoft's shader
+   compiler, DXC), which takes a while. The title is in `ps5/dist/PPSA99862`.
 
 ## Installing
 
@@ -44,7 +43,9 @@ supported on the PS5.
 2. Copy the game's files (the folder with `Default.xex`, `lu/`, `streams/` and the rest) into
    the title's `game` folder: `/data/homebrew/PPSA99862/game` on the console.
 3. Start Naughty Bear Recompiled from the homebrew launcher (or `make -C ps5 launch
-   PS5_HOST=...`, which sends a launcher payload to port 9021).
+   PS5_HOST=...`, which sends a launcher payload to port 9021). As on PC, the first start
+   translates the game's shaders while a progress bar is shown, into
+   `/data/homebrew/PPSA99862/cache/shaders.bin`; later starts skip it.
 
 Everything stays in the title's folder (a title can't write to `/data` outside it): saves
 go to `/data/homebrew/PPSA99862/save`, and the log to `/data/homebrew/PPSA99862/log.txt`;
@@ -68,7 +69,7 @@ game files or saves, but `make -C ps5 undeploy` deletes the whole folder, them i
 | Guest memory | 4 GB `mmap` | 4 GB of shared memory at a fixed address (`ps5platform/shm.h`) |
 | Input | SDL controllers and keyboard | the initial user's DualSense (`scePad`, src/hid/hid_ps5.cpp) |
 | Audio | SDL | `sceAudioOut`, stereo (src/apu/driver/ps5_driver.cpp) |
-| Shaders | translated on first run | the PC version's cache |
+| Shaders | translated on first run | the same, with DXC built for the console (ps5/tools/build-dxc.sh) |
 | Mods | yes | no |
 
 ## The title ID

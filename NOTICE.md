@@ -69,7 +69,10 @@ shader store and translator glue, copy shaders), `src/mods/*` (mod support), `sr
   (GPL-3.0) as Mihawk-99's [PS5_PayloadSDK](https://github.com/mihawk-99/PS5_PayloadSDK) fork,
   RADV from Mihawk-99's [PS5_Mesa](https://github.com/mihawk-99/PS5_Mesa) (Mesa, MIT), the
   [PacBrew](https://github.com/ps5-payload-dev/pacbrew-repo) ports (zstd, BSD) and zlib (zlib
-  license), and FFmpeg's XMA decoder cross-compiled from `thirdparty/FFmpeg` (LGPL-2.1+).
+  license), FFmpeg's XMA decoder cross-compiled from `thirdparty/FFmpeg` (LGPL-2.1+), and the
+  [DirectX Shader Compiler](https://github.com/microsoft/DirectXShaderCompiler) v1.8.2407
+  (University of Illinois/NCSA, with LLVM, Clang and SPIRV-Tools inside), built for the PS5
+  by `ps5/tools/build-dxc.sh` and linked into `eboot.bin`.
 - `ps5/tooling/radv/clc-cache.tar.xz`: Mesa's internal OpenCL kernels for RADV, precompiled
   to SPIR-V (Mesa, MIT), from UnleashedRecomp-Prospero, so building RADV doesn't need
   LLVM's SPIR-V tools.
