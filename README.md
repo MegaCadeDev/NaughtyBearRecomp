@@ -94,8 +94,8 @@ Debugging:
 
 | Variable | Effect |
 |-|-|
-| `NB_SCREENSHOT=file.ppm[:frame]` | Save a frame (default 600); convert with `tools/ppm2png.py` |
-| `NB_INPUT_SCRIPT="start@400+4,a@1150+4"` | Press buttons at given frames, for automated runs |
+| `NB_SCREENSHOT=file.ppm[:frame[+step*count]]` | Save a frame (default 600), or a series of `count` frames `step` apart (numbered files); convert with `tools/ppm2png.py` |
+| `NB_INPUT_SCRIPT="start@400+4,a@1150+4,rx+@1300+30"` | Press buttons (or push a stick: `lx`, `ly`, `rx`, `ry` with `+`/`-`) at given frames for a number of frames, for automated runs |
 | `NB_DEBUG_DRAWS=frame` | Log every draw of a frame (shaders, state, viewport) |
 | `NB_DEBUG_DECLS=1` | Log vertex declarations as they're first seen |
 | `NB_SHOW_RESOLVE=address` | Present a resolved texture instead of the front buffer |

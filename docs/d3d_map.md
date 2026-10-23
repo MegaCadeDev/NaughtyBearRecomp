@@ -59,6 +59,7 @@ Confidence: **high** = arguments match exactly; **likely** = consistent but unve
 | `0x82F29778` | `D3DDevice_SetStreamSource` | high | (dev, Stream, pVertexBuffer, Offset, Stride, dirty bit): writes vertex fetch constant 95 - Stream, keeps the buffer at device+12636+4n and stride / 4 at device+12704+n |
 | `0x82F29898` | `D3DDevice_SetIndices` | high | (dev, pIndexBuffer): kept at device+12612 |
 | `0x82F29630` | `D3DDevice_SetScissorRect` | high | (dev, pRect): writes the scissor into register images 0x2011/0x2012 |
+| `0x82F35788` | `D3DDevice_Clear` | high | (dev, Count, pRects, Flags, Color, Z in f1, Stencil in r9); converts the colour and calls `ClearF` (`0x82F35660`, also used by BeginTiling) per rectangle. Flags: render targets 0-3 in bits 0-3, depth `0x10`, stencil `0x20`; rectangles are clipped to the viewport and the scissor. Scaleform clears the stencil with it before each mask |
 | `0x82F398F0` | `D3DDevice_Resolve` | high | (dev, Flags, pSourceRect, pDestTexture, pDestPoint, DestLevel, DestSliceOrFace, pClearColor, ClearZ, ClearStencil, pParameters) |
 | `0x82F36FC8` | `D3DDevice_SetPredication` | high | (dev, Mask): writes PM4 `SET_BIN_SELECT`; used with tiling, not a clear |
 | `0x82F37EE0` | `D3DDevice_EndVertices` | high | ends a BeginVertices / BeginIndexedVertices draw |
@@ -94,9 +95,11 @@ buffer by dirty bits (`0x82F47D40`); the renderer reads them directly.
 | `0x2ED8` | current vertex declaration (element count at +24, 12-byte `D3DVERTEXELEMENT9` from +52) |
 | `0x3244` / `0x3248` | current pixel / vertex shader |
 | `12612` | current index buffer |
+| `12032` | scissor test enabled |
 | `12616`-`12628`, `12632` | render targets 0-3, depth/stencil surface |
 | `12636` + 4n, `12704` + n | vertex buffer and stride / 4 of stream n |
 | `12824` | viewport (`X, Y, Width, Height, MinZ, MaxZ` as floats) |
+| `12852` | scissor rectangle (left, top, right, bottom) |
 | `0x35A4` / `0x35A8` | command buffer write pointer / limit |
 | `0x5E80` | BehaviorFlags from CreateDevice |
 
@@ -125,11 +128,18 @@ At each draw `src/gpu/video.cpp`:
   by a computed register (skinning palettes, particles);
 - converts strips, fans and quads to triangle lists on the CPU (honouring strip restarts);
 - reads textures from their fetch constants (untiling and byte-swapping them), and their
-  samplers' clamp and filter modes.
+  samplers' clamp and filter modes. Uploaded textures are kept, and their guest memory is
+  hashed again when they're used in a later frame (small ones every frame, large ones
+  every 16): the game loads each menu's and loading screen's images into memory earlier
+  ones used, so a texture at the same address with the same format can be a new image.
 
 Draws come from `DrawVertices`, `DrawIndexedVertices` and the `Begin(Indexed)Vertices` /
 `EndVertices` pair (which `DrawVerticesUP` and `DrawIndexedVerticesUP` use too); particle
 systems call the latter directly.
+
+`Clear` clears the bound targets within its rectangles; the menus and HUD (Scaleform)
+clear the stencil before drawing each mask shape, then draw the masked content with a
+stencil test.
 
 The game renders with predicated tiling: `BeginTiling` clears the targets, `EndTiling`
 and `Resolve` copy a surface into a texture. Resolves copy into a host texture that stands

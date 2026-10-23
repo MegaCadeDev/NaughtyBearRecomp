@@ -43,13 +43,18 @@ namespace
     PendingRumble g_rumble;
     uint32_t g_packetNumber = 0;
 
-    // NB_INPUT_SCRIPT="start@300+5,a@600+5": hold a button from a frame for a number of
-    // frames. For automated testing without a person at the controls.
+    // NB_INPUT_SCRIPT="start@300+5,a@600+5,rx+@900+30": hold a button, or push a stick all the
+    // way (lx, ly, rx, ry with + or -), from a frame for a number of frames. For automated
+    // testing without a person at the controls.
+    enum class ScriptedAxis { None, LX, LY, RX, RY };
+
     struct ScriptedPress
     {
         uint16_t button;
         uint64_t frame;
         uint64_t length;
+        ScriptedAxis axis = ScriptedAxis::None;
+        int16_t value = 0;
     };
     std::vector<ScriptedPress> g_script;
     std::atomic<uint64_t> g_frame = 0;
@@ -74,7 +79,8 @@ namespace
             std::string item = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
             start = end == std::string::npos ? text.size() : end + 1;
 
-            size_t at = item.find('@'), plus = item.find('+');
+            size_t at = item.find('@');
+            size_t plus = at == std::string::npos ? at : item.find('+', at);
             if (at == std::string::npos)
                 continue;
             std::string name = item.substr(0, at);
@@ -83,6 +89,11 @@ namespace
             for (auto [n, button] : names)
                 if (name == n)
                     g_script.push_back({ button, frame, length });
+            const std::pair<const char*, ScriptedAxis> axes[] =
+                { { "lx", ScriptedAxis::LX }, { "ly", ScriptedAxis::LY }, { "rx", ScriptedAxis::RX }, { "ry", ScriptedAxis::RY } };
+            for (auto [n, axis] : axes)
+                if (name.size() == 3 && name.compare(0, 2, n) == 0 && (name[2] == '+' || name[2] == '-'))
+                    g_script.push_back({ 0, frame, length, axis, int16_t(name[2] == '+' ? 32767 : -32768) });
         }
         LOGFN("Input: {} scripted presses", g_script.size());
     }
@@ -382,8 +393,19 @@ uint32_t hid::GetState(uint32_t userIndex, XAMINPUT_STATE* state)
     ApplyKeyboard(state->Gamepad);
     uint64_t frame = g_frame;
     for (const auto& press : g_script)
-        if (frame >= press.frame && frame < press.frame + press.length)
-            state->Gamepad.wButtons |= press.button;
+    {
+        if (frame < press.frame || frame >= press.frame + press.length)
+            continue;
+        state->Gamepad.wButtons |= press.button;
+        switch (press.axis)
+        {
+        case ScriptedAxis::LX: state->Gamepad.sThumbLX = press.value; break;
+        case ScriptedAxis::LY: state->Gamepad.sThumbLY = press.value; break;
+        case ScriptedAxis::RX: state->Gamepad.sThumbRX = press.value; break;
+        case ScriptedAxis::RY: state->Gamepad.sThumbRY = press.value; break;
+        case ScriptedAxis::None: break;
+        }
+    }
     return ERROR_SUCCESS;
 }
 

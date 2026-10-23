@@ -47,6 +47,7 @@ extern "C" PPC_FUNC(__imp__sub_82F37138); // D3DDevice_BeginTiling
 extern "C" PPC_FUNC(__imp__sub_82F37798); // D3DDevice_EndTiling
 extern "C" PPC_FUNC(__imp__sub_82F398F0); // D3DDevice_Resolve
 extern "C" PPC_FUNC(__imp__sub_82F33D50); // D3DDevice_Swap
+extern "C" PPC_FUNC(__imp__sub_82F35788); // D3DDevice_Clear
 extern "C" PPC_FUNC(__imp__sub_82F30050); // vertex shader construct
 extern "C" PPC_FUNC(__imp__sub_82F2FF28); // pixel shader construct
 extern "C" PPC_FUNC(__imp__sub_82F30188); // CreateVertexShader(container) -> object
@@ -71,6 +72,9 @@ namespace
     constexpr uint32_t DEVICE_RENDER_TARGETS = 12616;     // 4 surfaces
     constexpr uint32_t DEVICE_DEPTH_STENCIL = 12632;
     constexpr uint32_t DEVICE_STREAM_STRIDES = 12704;     // 16 bytes: stride / 4 per stream
+    constexpr uint32_t DEVICE_SCISSOR_ENABLE = 12032;
+    constexpr uint32_t DEVICE_VIEWPORT = 12824;           // D3DVIEWPORT9 X, Y, Width, Height as floats
+    constexpr uint32_t DEVICE_SCISSOR_RECT = 12852;       // left, top, right, bottom
     // Vertex declaration object: element count at +24, D3DVERTEXELEMENT9[12 bytes] at +52.
     constexpr uint32_t DECLARATION_COUNT = 24;
     constexpr uint32_t DECLARATION_ELEMENTS = 52;
@@ -120,6 +124,7 @@ namespace
         RB_DEPTHCONTROL = 0x2200,
         RB_BLENDCONTROL0 = 0x2201,
         RB_COLORCONTROL = 0x2202,
+        PA_SU_SC_MODE_CNTL = 0x2205,
         PA_CL_VTE_CNTL = 0x2206,
         // SetScissorRect (0x82F29630) keeps the scissor here: x in bits 0-14, y in 16-30.
         PA_SC_SCISSOR_TL = 0x2011,
@@ -334,10 +339,14 @@ namespace
     ankerl::unordered_dense::map<uint64_t, std::unique_ptr<RenderPipeline>> g_pipelines;
     std::set<uint64_t> g_missingShaders;
 
-    // NB_SCREENSHOT=path[:frame] saves the presented image of that frame (default 600) as PPM.
+    // NB_SCREENSHOT=path[:frame[+step*count]] saves the presented image of that frame (default
+    // 600) as PPM; with a step, a series of count frames (10 by default), numbered in the
+    // file names.
     std::unique_ptr<RenderBuffer> g_readbackBuffer;
     std::string g_screenshotPath;
     uint64_t g_screenshotFrame = 600;
+    uint64_t g_screenshotStep = 0;
+    uint64_t g_screenshotCount = 1;
     uint64_t g_frameNumber = 0;
 
     // NB_DEBUG_DRAWS=frame logs every draw of that frame; NB_NO_BLEND=1 draws opaque.
@@ -934,20 +943,69 @@ namespace
     }
 
     uint32_t g_nextTextureDescriptor = NULL_COUNT;
+    std::vector<uint32_t> g_freeTextureDescriptors;
 
     uint32_t AllocateTextureDescriptor()
     {
+        if (!g_freeTextureDescriptors.empty())
+        {
+            uint32_t index = g_freeTextureDescriptors.back();
+            g_freeTextureDescriptors.pop_back();
+            return index;
+        }
         return g_nextTextureDescriptor++;
     }
+
+    // Textures uploaded from guest memory, kept across frames. The game reuses memory for
+    // new textures (each menu and loading screen loads its own), so the contents are hashed
+    // and checked again when a texture is used in a new frame: every frame for small
+    // textures, every TEXTURE_CHECK_INTERVAL frames for large ones.
+    constexpr uint64_t TEXTURE_CHECK_INTERVAL = 16;
+    constexpr uint64_t SMALL_TEXTURE_SIZE = 1024 * 1024;
+    constexpr uint64_t TEXTURE_LIFETIME = 600;
 
     struct HostTexture
     {
         std::unique_ptr<RenderTexture> texture;
         std::unique_ptr<RenderTextureView> view;
         uint32_t descriptorIndex = 0;
+        uint64_t contentHash = 0;
+        uint64_t checkedFrame = 0;
+        uint64_t usedFrame = 0;
     };
 
     ankerl::unordered_dense::map<uint64_t, HostTexture> g_textures;
+
+    // Textures replaced or dropped during a frame; released once the frame has executed.
+    std::vector<HostTexture> g_retiredTextures;
+
+    void RetireTexture(HostTexture&& texture)
+    {
+        if (texture.texture)
+            g_retiredTextures.push_back(std::move(texture));
+    }
+
+    void ReleaseRetiredTextures()
+    {
+        for (const auto& texture : g_retiredTextures)
+            g_freeTextureDescriptors.push_back(texture.descriptorIndex);
+        g_retiredTextures.clear();
+    }
+
+    void ReleaseUnusedTextures()
+    {
+        for (auto it = g_textures.begin(); it != g_textures.end();)
+        {
+            if (g_frameIndex - it->second.usedFrame > TEXTURE_LIFETIME)
+            {
+                RetireTexture(std::move(it->second));
+                it = g_textures.erase(it);
+            }
+            else
+                ++it;
+        }
+    }
+
     std::set<uint32_t> g_unsupportedTextureFormats;
 
     // ---- Render targets ----
@@ -1140,8 +1198,9 @@ namespace
         // The cache key leaves out the sampler fields (clamp modes, filters).
         uint32_t keyData[5] = { fetch[0] & 0xFFC00003, fetch[1], fetch[2], fetch[3] & 0x1FFE, fetch[5] & 0x600 };
         uint64_t key = XXH3_64bits(keyData, sizeof(keyData));
-        if (auto it = g_textures.find(key); it != g_textures.end())
-            return it->second.descriptorIndex;
+        auto existing = g_textures.find(key);
+        if (existing != g_textures.end() && (existing->second.usedFrame == g_frameIndex || !existing->second.texture))
+            return existing->second.descriptorIndex;
 
         uint32_t dimension = (fetch[5] >> 9) & 3;
         uint32_t formatId = fetch[1] & 0x3F;
@@ -1167,11 +1226,31 @@ namespace
         uint32_t pitchBlocks = std::max(pitch / info.blockSize, blocksWide);
         uint64_t size = uint64_t(blocksWide) * blocksHigh * info.bytesPerBlock;
 
+        // The guest memory the texture occupies: tiled textures are laid out in 32x32 block tiles.
+        uint64_t sourceSize = tiled ? uint64_t((pitchBlocks + 31) & ~31u) * ((blocksHigh + 31) & ~31u) * info.bytesPerBlock
+                                    : uint64_t(pitchBlocks) * blocksHigh * info.bytesPerBlock;
+        const uint8_t* source = (const uint8_t*)g_memory.Translate(address);
+
+        if (existing != g_textures.end())
+        {
+            HostTexture& entry = existing->second;
+            entry.usedFrame = g_frameIndex;
+            uint64_t interval = sourceSize <= SMALL_TEXTURE_SIZE ? 1 : TEXTURE_CHECK_INTERVAL;
+            if (g_frameIndex - entry.checkedFrame < interval)
+                return entry.descriptorIndex;
+            entry.checkedFrame = g_frameIndex;
+            uint64_t contentHash = XXH3_64bits(source, sourceSize);
+            if (contentHash == entry.contentHash)
+                return entry.descriptorIndex;
+            // Rewritten: upload it again (draws earlier in this frame keep the old one).
+            RetireTexture(std::move(entry));
+            g_textures.erase(existing);
+        }
+
         auto [memory, offset] = Allocate(size, 512);
         if (memory == nullptr)
             return NULL_TEXTURE_2D;
 
-        const uint8_t* source = (const uint8_t*)g_memory.Translate(address);
         for (uint32_t by = 0; by < blocksHigh; by++)
         {
             for (uint32_t bx = 0; bx < blocksWide; bx++)
@@ -1202,6 +1281,9 @@ namespace
 
         host.descriptorIndex = AllocateTextureDescriptor();
         g_textureDescriptorSet->setTexture(host.descriptorIndex, host.texture.get(), RenderTextureLayout::SHADER_READ, host.view.get());
+        host.contentHash = XXH3_64bits(source, sourceSize);
+        host.checkedFrame = g_frameIndex;
+        host.usedFrame = g_frameIndex;
         uint32_t descriptor = host.descriptorIndex;
         g_textures[key] = std::move(host);
         return descriptor;
@@ -1470,7 +1552,14 @@ namespace
         bool acquired = !g_swapChain->isEmpty() && g_swapChain->getWidth() > 0 && g_swapChain->getHeight() > 0
             && g_swapChain->acquireTexture(g_acquireSemaphore.get(), &index);
 
-        bool screenshot = gameFrame && !g_screenshotPath.empty() && ++g_frameNumber == g_screenshotFrame;
+        bool screenshot = false;
+        if (gameFrame && !g_screenshotPath.empty())
+        {
+            uint64_t frame = ++g_frameNumber;
+            screenshot = frame == g_screenshotFrame
+                || (g_screenshotStep != 0 && frame > g_screenshotFrame && (frame - g_screenshotFrame) % g_screenshotStep == 0
+                    && (frame - g_screenshotFrame) / g_screenshotStep < g_screenshotCount);
+        }
         if (screenshot)
         {
             RenderTextureBarrier toCopy(g_presentTarget.get(), RenderTextureLayout::COPY_SOURCE);
@@ -1528,7 +1617,10 @@ namespace
         {
             // B8G8R8A8 -> binary PPM (RGB).
             auto* pixels = (const uint8_t*)g_readbackBuffer->map();
-            std::ofstream file(g_screenshotPath, std::ios::binary);
+            std::filesystem::path path = g_screenshotPath;
+            if (g_screenshotStep != 0)
+                path.replace_filename(fmt::format("{}_{}{}", path.stem().string(), g_frameNumber, path.extension().string()));
+            std::ofstream file(path, std::ios::binary);
             file << "P6\n" << PRESENT_WIDTH << " " << PRESENT_HEIGHT << "\n255\n";
             for (uint32_t i = 0; i < PRESENT_WIDTH * PRESENT_HEIGHT; i++)
             {
@@ -1536,13 +1628,18 @@ namespace
                 file.write(rgb, 3);
             }
             g_readbackBuffer->unmap();
-            LOGFN("Video: saved frame {} to {}", g_frameNumber, g_screenshotPath);
+            LOGFN("Video: saved frame {} to {}", g_frameNumber, path.string());
         }
 
         g_inFrame = false;
+        // The frame has executed: textures it no longer needs can go.
+        ReleaseRetiredTextures();
         g_frameIndex++;
         if ((g_frameIndex % 64) == 0)
+        {
             ReleaseUnusedVertexBuffers();
+            ReleaseUnusedTextures();
+        }
 
         if (!gameFrame)
             return;
@@ -1642,6 +1739,62 @@ namespace
         }
         if (clearDepth && g_boundDepth != nullptr)
             g_commandList->clearDepthStencil(true, true, depth, stencil & 0xFF);
+    }
+
+    // D3DDevice_Clear: D3DCLEAR flags are render targets 0-3 in bits 0-3, depth 0x10 and
+    // stencil 0x20. Like the console, each rectangle is clipped to the viewport and, when
+    // enabled, the scissor (as the game set them: device fields, not registers).
+    void Clear(uint32_t count, uint32_t rects, uint32_t flags, uint32_t color, float depth, uint32_t stencil)
+    {
+        if (!BindTargets())
+            return;
+        uint32_t width = g_boundColor != nullptr ? g_boundColor->width : g_boundDepth->width;
+        uint32_t height = g_boundColor != nullptr ? g_boundColor->height : g_boundDepth->height;
+
+        float viewportX = LoadFloat(g_guestDevice + DEVICE_VIEWPORT);
+        float viewportY = LoadFloat(g_guestDevice + DEVICE_VIEWPORT + 4);
+        RenderRect bounds(int32_t(viewportX), int32_t(viewportY),
+            int32_t(viewportX + LoadFloat(g_guestDevice + DEVICE_VIEWPORT + 8)), int32_t(viewportY + LoadFloat(g_guestDevice + DEVICE_VIEWPORT + 12)));
+        if (Load32(g_guestDevice + DEVICE_SCISSOR_ENABLE) != 0)
+        {
+            bounds.left = std::max(bounds.left, int32_t(Load32(g_guestDevice + DEVICE_SCISSOR_RECT)));
+            bounds.top = std::max(bounds.top, int32_t(Load32(g_guestDevice + DEVICE_SCISSOR_RECT + 4)));
+            bounds.right = std::min(bounds.right, int32_t(Load32(g_guestDevice + DEVICE_SCISSOR_RECT + 8)));
+            bounds.bottom = std::min(bounds.bottom, int32_t(Load32(g_guestDevice + DEVICE_SCISSOR_RECT + 12)));
+        }
+        bounds.right = std::min<int32_t>(bounds.right, width);
+        bounds.bottom = std::min<int32_t>(bounds.bottom, height);
+
+        std::vector<RenderRect> clearRects;
+        for (uint32_t i = 0; i < (rects != 0 ? count : 1); i++)
+        {
+            RenderRect rect(0, 0, int32_t(width), int32_t(height));
+            if (rects != 0)
+            {
+                uint32_t address = rects + i * 16;
+                rect = RenderRect(int32_t(Load32(address)), int32_t(Load32(address + 4)), int32_t(Load32(address + 8)), int32_t(Load32(address + 12)));
+            }
+            rect.left = std::max(rect.left, bounds.left);
+            rect.top = std::max(rect.top, bounds.top);
+            rect.right = std::min(rect.right, bounds.right);
+            rect.bottom = std::min(rect.bottom, bounds.bottom);
+            if (rect.left < rect.right && rect.top < rect.bottom)
+                clearRects.push_back(rect);
+        }
+        if (clearRects.empty())
+            return;
+
+        if ((flags & 1) != 0 && g_boundColor != nullptr)
+        {
+            // D3DCOLOR is ARGB.
+            RenderColor value(float((color >> 16) & 0xFF) / 255.0f, float((color >> 8) & 0xFF) / 255.0f, float(color & 0xFF) / 255.0f,
+                float(color >> 24) / 255.0f);
+            g_commandList->clearColor(0, value, clearRects.data(), uint32_t(clearRects.size()));
+        }
+        bool clearDepth = (flags & 0x10) != 0;
+        bool clearStencil = (flags & 0x20) != 0;
+        if ((clearDepth || clearStencil) && g_boundDepth != nullptr)
+            g_commandList->clearDepthStencil(clearDepth, clearStencil, depth, stencil & 0xFF, clearRects.data(), uint32_t(clearRects.size()));
     }
 
     // D3DRESOLVE flags: render target index in bits 0-1, depth/stencil bit 2, clear the
@@ -1900,6 +2053,12 @@ namespace
             uint32_t fetch[6];
             LoadFetchConstant(g_guestDevice + DEVICE_FETCH_CONSTANTS + i * 24, fetch);
             shared.texture2DIndices[i] = GetTextureDescriptor(fetch);
+            if (DebugThisFrame() && (fetch[0] & 3) == 2)
+            {
+                uint32_t address = GpuToGuest(fetch[1] & 0xFFFFF000);
+                LOGF_IMPL(Utility, "draw", "  texture {} @{:08X} format {} {}x{} tiled {} resolved {}", i, address, fetch[1] & 0x3F, (fetch[2] & 0x1FFF) + 1,
+                    ((fetch[2] >> 13) & 0x1FFF) + 1, fetch[0] >> 31, g_resolvedTextures.contains(address & 0x1FFFFFFF));
+            }
             shared.texture3DIndices[i] = NULL_TEXTURE_3D;
             shared.textureCubeIndices[i] = NULL_TEXTURE_CUBE;
             shared.samplerIndices[i] = (fetch[0] & 3) == 2 ? GetSamplerIndex(fetch) : SAMPLER_DEFAULT;
@@ -1995,10 +2154,10 @@ namespace
 
         if (DebugThisFrame())
         {
-            LOGF_IMPL(Utility, "draw", "#{} decl {:016x} prim {} count {} indexed {} up {} vs {:016x} ps {:016x} rt {}x{} depth {} blend {:08X} zctl {:08X} vte {:08X} vp ({:.1f},{:.1f} {:.1f}x{:.1f} z {:.3f}-{:.3f}) streams {}",
+            LOGF_IMPL(Utility, "draw", "#{} decl {:016x} prim {} count {} indexed {} up {} vs {:016x} ps {:016x} rt {}x{} depth {} blend {:08X} zctl {:08X} vte {:08X} vp ({:.1f},{:.1f} {:.1f}x{:.1f} z {:.3f}-{:.3f}) streams {} cmask {:X} sref {:06X} sc {:08X}-{:08X} mode {:08X}",
                 g_drawsThisFrame, declaration->hash, call.primitiveType, call.count, call.indexed, call.userPointer, vsHash, psHash, targetWidth, targetHeight,
                 g_boundDepth != nullptr, key.blendControl, key.depthControl, vte, viewport.x, viewport.y, viewport.width, viewport.height,
-                viewport.minDepth, viewport.maxDepth, streamCount);
+                viewport.minDepth, viewport.maxDepth, streamCount, key.colorMask, Reg(RB_STENCILREFMASK), Reg(PA_SC_SCISSOR_TL), Reg(PA_SC_SCISSOR_BR), Reg(PA_SU_SC_MODE_CNTL));
         }
 
         g_commandList->setPipeline(pipeline);
@@ -2174,8 +2333,15 @@ bool Video::Init(SDL_Window* window)
         g_screenshotPath = screenshot;
         if (auto colon = g_screenshotPath.rfind(':'); colon != std::string::npos)
         {
-            g_screenshotFrame = std::stoull(g_screenshotPath.substr(colon + 1));
+            std::string frames = g_screenshotPath.substr(colon + 1);
             g_screenshotPath.resize(colon);
+            g_screenshotFrame = std::stoull(frames);
+            if (auto plus = frames.find('+'); plus != std::string::npos)
+            {
+                g_screenshotStep = std::max<uint64_t>(1, std::stoull(frames.substr(plus + 1)));
+                auto times = frames.find('*', plus);
+                g_screenshotCount = times != std::string::npos ? std::stoull(frames.substr(times + 1)) : 10;
+            }
         }
         g_readbackBuffer = g_device->createBuffer(RenderBufferDesc::ReadbackBuffer(uint64_t(PRESENT_WIDTH) * PRESENT_HEIGHT * 4));
     }
@@ -2268,6 +2434,22 @@ PPC_FUNC(sub_82F398F0)
         }
     }
     __imp__sub_82F398F0(ctx, base);
+}
+
+// D3DDevice_Clear(dev, Count, pRects, Flags, Color, Z (f1), Stencil (r9)). The game's menus
+// and HUD (Scaleform) clear the stencil buffer before drawing each mask.
+PPC_FUNC(sub_82F35788)
+{
+    TRACE_ENTER(0x82F35788);
+    {
+        std::lock_guard lock(g_videoMutex);
+        if (g_guestDevice != 0)
+        {
+            BeginFrame();
+            Clear(ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, float(ctx.f1.f64), ctx.r9.u32);
+        }
+    }
+    __imp__sub_82F35788(ctx, base);
 }
 
 // D3DDevice_Swap(dev, pFrontBuffer, pParameters): show the frame.
@@ -2435,3 +2617,4 @@ PPC_FUNC(sub_82F388E8)
     __imp__sub_82F388E8(ctx, base);
     DrawPendingVertices();
 }
+
