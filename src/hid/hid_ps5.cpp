@@ -52,21 +52,48 @@ namespace
         PAD_SQUARE = 0x8000, PAD_TOUCHPAD = 0x100000;
 
     std::mutex g_mutex;
+    int g_userServiceResult = 0;
+    int g_padInitResult = 0;
     int32_t g_handle = -1;
     uint32_t g_packetNumber = 0;
     bool g_rumblePending = false;
     XAMINPUT_VIBRATION g_rumble{};
 
+    // The initial user's pad; if the user service doesn't say who that is, the user IDs
+    // UnleashedRecomp-Prospero falls back to.
     void OpenPad()
     {
         int32_t user = -1;
-        if (sceUserServiceGetInitialUser(&user) != 0 || user < 0)
-            return;
-        g_handle = scePadOpen(user, 0, 0, nullptr);
-        if (g_handle < 0)
-            g_handle = scePadGetHandle(user, 0, 0);
-        if (g_handle >= 0)
-            LOGFN("Input: DualSense of user {} (handle {})", user, g_handle);
+        int userResult = sceUserServiceGetInitialUser(&user);
+        std::vector<int32_t> users;
+        if (userResult == 0 && user >= 0)
+            users.push_back(user);
+        for (int32_t fallback : { 1, 0, 0x10000000, 0xFF })
+            if (std::find(users.begin(), users.end(), fallback) == users.end())
+                users.push_back(fallback);
+
+        int lastResult = 0;
+        for (int32_t candidate : users)
+        {
+            int32_t handle = scePadOpen(candidate, 0, 0, nullptr);
+            if (handle < 0)
+                handle = scePadGetHandle(candidate, 0, 0);
+            if (handle >= 0)
+            {
+                g_handle = handle;
+                LOGFN("Input: DualSense of user 0x{:X} (handle {})", uint32_t(candidate), handle);
+                return;
+            }
+            lastResult = handle;
+        }
+
+        static bool reported = false;
+        if (!reported)
+        {
+            reported = true;
+            LOGFN_ERROR("Input: no pad (user service 0x{:08X}, pad init 0x{:08X}, initial user 0x{:08X} = {}, last open 0x{:08X})",
+                uint32_t(g_userServiceResult), uint32_t(g_padInitResult), uint32_t(userResult), user, uint32_t(lastResult));
+        }
     }
 
     // A stick axis (0-255, 128 at rest) as XInput's (-32768-32767, up positive), with a
@@ -84,8 +111,8 @@ namespace
 
 void hid::Init()
 {
-    sceUserServiceInitialize(nullptr);
-    scePadInit();
+    g_userServiceResult = sceUserServiceInitialize(nullptr);
+    g_padInitResult = scePadInit();
     std::lock_guard lock(g_mutex);
     OpenPad();
 }
@@ -101,9 +128,19 @@ uint32_t hid::GetState(uint32_t userIndex, XAMINPUT_STATE* state)
     std::lock_guard lock(g_mutex);
     if (g_handle < 0)
         OpenPad();
+    // (The state's connected flag isn't checked: UnleashedRecomp-Prospero doesn't rely on it.)
     ScePadData data{};
-    if (g_handle < 0 || scePadReadState(g_handle, &data) != 0 || !data.connected)
+    int result = g_handle >= 0 ? scePadReadState(g_handle, &data) : -1;
+    if (result != 0)
+    {
+        static bool reported = false;
+        if (!reported && g_handle >= 0)
+        {
+            reported = true;
+            LOGFN_ERROR("Input: scePadReadState failed (0x{:08X})", uint32_t(result));
+        }
         return ERROR_DEVICE_NOT_CONNECTED;
+    }
 
     state->dwPacketNumber = g_packetNumber++;
     XAMINPUT_GAMEPAD& pad = state->Gamepad;
