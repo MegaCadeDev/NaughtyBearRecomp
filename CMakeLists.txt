@@ -44,6 +44,15 @@ find_package(SDL2 REQUIRED)
 set(SDL_VULKAN_ENABLED ON CACHE BOOL "" FORCE)
 add_subdirectory(thirdparty/plume EXCLUDE_FROM_ALL)
 
+# Dear ImGui, for the mods menu shown before the game starts (src/ui/launcher.cpp). It
+# draws with SDL's own renderer, separate from the game's.
+set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/thirdparty/imgui)
+add_library(imgui STATIC
+    ${IMGUI_DIR}/imgui.cpp ${IMGUI_DIR}/imgui_draw.cpp ${IMGUI_DIR}/imgui_tables.cpp ${IMGUI_DIR}/imgui_widgets.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_sdl2.cpp ${IMGUI_DIR}/backends/imgui_impl_sdlrenderer2.cpp)
+target_include_directories(imgui PUBLIC ${IMGUI_DIR} ${IMGUI_DIR}/backends)
+target_link_libraries(imgui PUBLIC SDL2::SDL2)
+
 # zstd and smol-v decode the shader cache; both come with XenosRecomp.
 set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
 set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
@@ -157,6 +166,7 @@ target_include_directories(ffmpeg INTERFACE ${FFMPEG_PREFIX}/include)
 target_link_libraries(ffmpeg INTERFACE ${FFMPEG_PREFIX}/lib/libavcodec.a ${FFMPEG_PREFIX}/lib/libavutil.a m)
 target_compile_definitions(NaughtyBear PRIVATE NB_HAVE_FFMPEG)
 target_link_libraries(NaughtyBear PRIVATE ffmpeg)
+target_link_libraries(NaughtyBear PRIVATE imgui)
 target_link_libraries(NaughtyBear PRIVATE nb_shader_translator)
 set_target_properties(NaughtyBear PROPERTIES BUILD_RPATH "$ORIGIN" INSTALL_RPATH "$ORIGIN")
 add_custom_command(TARGET NaughtyBear POST_BUILD

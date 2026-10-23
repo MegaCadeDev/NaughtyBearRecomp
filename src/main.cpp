@@ -13,6 +13,7 @@
 #include <kernel/xam.h>
 #include <kernel/xex_modules.h>
 #include <os/logger.h>
+#include <ui/launcher.h>
 #include <user/paths.h>
 
 #include <file.h>
@@ -171,10 +172,22 @@ int main(int argc, char** argv)
     os::logger::Init();
     setvbuf(stdout, nullptr, _IONBF, 0); // keep log lines when the process dies
 
+    // Options: --mods-menu shows the mods menu even when it's turned off, --no-mods-menu
+    // skips it; anything else is the path to the game.
     std::filesystem::path xexPath;
-    if (argc > 1)
+    bool forceModsMenu = false, skipModsMenu = false;
+    for (int i = 1; i < argc; i++)
     {
-        xexPath = argv[1];
+        std::string_view argument = argv[i];
+        if (argument == "--mods-menu")
+            forceModsMenu = true;
+        else if (argument == "--no-mods-menu")
+            skipModsMenu = true;
+        else
+            xexPath = argument;
+    }
+    if (!xexPath.empty())
+    {
         if (std::filesystem::is_directory(xexPath))
             xexPath /= "Default.xex";
     }
@@ -219,6 +232,9 @@ int main(int argc, char** argv)
         LOGFN_ERROR("SDL_Init failed: {}", SDL_GetError());
         return EXIT_FAILURE;
     }
+    if (!skipModsMenu && !launcher::Run(g_userPath / "mods", forceModsMenu))
+        return EXIT_SUCCESS;
+
     // The game renders at 1280x720; the renderer scales that to the window.
     // NB_WINDOW_SIZE=WxH sets the starting size.
     int windowWidth = 1280, windowHeight = 720;

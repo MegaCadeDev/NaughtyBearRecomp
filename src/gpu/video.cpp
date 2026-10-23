@@ -17,6 +17,7 @@
 #include <hid/hid.h>
 #include <kernel/memory.h>
 #include <mods/mods.h>
+#include <stb_image_write.h>
 #include <os/logger.h>
 #include <user/paths.h>
 #include <plume_render_interface.h>
@@ -987,6 +988,10 @@ namespace
     // Textures replaced or dropped during a frame; released once the frame has executed.
     std::vector<HostTexture> g_retiredTextures;
 
+    // Staging buffers for mod textures (too big for the frame's upload buffer), released
+    // with them.
+    std::vector<std::unique_ptr<RenderBuffer>> g_modStagingBuffers;
+
     void RetireTexture(HostTexture&& texture)
     {
         if (texture.texture)
@@ -1190,6 +1195,23 @@ namespace
             fetch[i] = Load32(address + i * 4);
     }
 
+    // Copies a texture's top level out of guest memory: untiled, rows of blocks packed, in
+    // host byte order. destination holds blocksWide * blocksHigh blocks.
+    void UntileTexture(const uint8_t* source, const XenosFormatInfo& info, uint32_t blocksWide, uint32_t blocksHigh, uint32_t pitchBlocks,
+        bool tiled, uint32_t endian, uint8_t* destination)
+    {
+        for (uint32_t by = 0; by < blocksHigh; by++)
+        {
+            for (uint32_t bx = 0; bx < blocksWide; bx++)
+            {
+                uint32_t sourceBlock = tiled ? TiledBlockIndex(bx, by, pitchBlocks, info.bytesPerBlock) : by * pitchBlocks + bx;
+                uint8_t* block = destination + (uint64_t(by) * blocksWide + bx) * info.bytesPerBlock;
+                memcpy(block, source + uint64_t(sourceBlock) * info.bytesPerBlock, info.bytesPerBlock);
+                SwapEndian(block, info.bytesPerBlock, endian);
+            }
+        }
+    }
+
     // Returns the descriptor index for a texture fetch constant, uploading it on first use.
     uint32_t GetTextureDescriptor(const uint32_t fetch[6])
     {
@@ -1259,16 +1281,7 @@ namespace
         if (memory == nullptr)
             return NULL_TEXTURE_2D;
 
-        for (uint32_t by = 0; by < blocksHigh; by++)
-        {
-            for (uint32_t bx = 0; bx < blocksWide; bx++)
-            {
-                uint32_t sourceBlock = tiled ? TiledBlockIndex(bx, by, pitchBlocks, info.bytesPerBlock) : by * pitchBlocks + bx;
-                uint8_t* destination = memory + (uint64_t(by) * blocksWide + bx) * info.bytesPerBlock;
-                memcpy(destination, source + uint64_t(sourceBlock) * info.bytesPerBlock, info.bytesPerBlock);
-                SwapEndian(destination, info.bytesPerBlock, endian);
-            }
-        }
+        UntileTexture(source, info, blocksWide, blocksHigh, pitchBlocks, tiled, endian, memory);
 
         HostTexture host;
         host.texture = g_device->createTexture(RenderTextureDesc::Texture2D(width, height, 1, info.format));
@@ -1642,6 +1655,7 @@ namespace
         g_inFrame = false;
         // The frame has executed: textures it no longer needs can go.
         ReleaseRetiredTextures();
+        g_modStagingBuffers.clear();
         g_frameIndex++;
         if ((g_frameIndex % 64) == 0)
         {
@@ -1961,8 +1975,120 @@ namespace
         return !mesh.used.empty();
     }
 
+    // Decodes a 4x4 DXT colour block (BC1 layout) into RGBA; BC1 alone has 1-bit alpha.
+    void DecodeColorBlock(const uint8_t* block, bool opaque, uint8_t out[16][4])
+    {
+        uint16_t c0 = uint16_t(block[0] | (block[1] << 8)), c1 = uint16_t(block[2] | (block[3] << 8));
+        uint8_t colors[4][4];
+        auto expand = [](uint16_t c, uint8_t* rgba)
+            {
+                rgba[0] = uint8_t(((c >> 11) & 31) * 255 / 31);
+                rgba[1] = uint8_t(((c >> 5) & 63) * 255 / 63);
+                rgba[2] = uint8_t((c & 31) * 255 / 31);
+                rgba[3] = 255;
+            };
+        expand(c0, colors[0]);
+        expand(c1, colors[1]);
+        for (int i = 0; i < 4; i++)
+        {
+            if (c0 > c1 || opaque)
+            {
+                colors[2][i] = uint8_t((2 * colors[0][i] + colors[1][i]) / 3);
+                colors[3][i] = uint8_t((colors[0][i] + 2 * colors[1][i]) / 3);
+            }
+            else
+            {
+                colors[2][i] = uint8_t((colors[0][i] + colors[1][i]) / 2);
+                colors[3][i] = 0; // transparent black
+            }
+        }
+        uint32_t bits = block[4] | (block[5] << 8) | (block[6] << 16) | (uint32_t(block[7]) << 24);
+        for (int i = 0; i < 16; i++)
+            memcpy(out[i], colors[(bits >> (i * 2)) & 3], 4);
+    }
+
+    // A texture of a fetch constant as RGBA8 (with its component swizzle), for exports.
+    // Handles the formats game models use; false for others.
+    bool ReadTextureRGBA(const uint32_t fetch[6], uint32_t& width, uint32_t& height, std::vector<uint8_t>& rgba)
+    {
+        uint32_t formatId = fetch[1] & 0x3F;
+        XenosFormatInfo info;
+        if (((fetch[5] >> 9) & 3) != 1 || !GetXenosFormat(formatId, info))
+            return false;
+        bool dxt1 = formatId == 18 || formatId == 51, dxt3 = formatId == 19 || formatId == 52, dxt5 = formatId == 20 || formatId == 53;
+        bool rgba8 = formatId == 6 || formatId == 50;
+        if (!dxt1 && !dxt3 && !dxt5 && !rgba8)
+            return false;
+
+        width = (fetch[2] & 0x1FFF) + 1;
+        height = ((fetch[2] >> 13) & 0x1FFF) + 1;
+        uint32_t pitch = ((fetch[0] >> 22) & 0x1FF) * 32;
+        if (pitch == 0)
+            pitch = width;
+        uint32_t blocksWide = (width + info.blockSize - 1) / info.blockSize;
+        uint32_t blocksHigh = (height + info.blockSize - 1) / info.blockSize;
+        std::vector<uint8_t> blocks(size_t(blocksWide) * blocksHigh * info.bytesPerBlock);
+        UntileTexture((const uint8_t*)g_memory.Translate(GpuToGuest(fetch[1] & 0xFFFFF000)), info, blocksWide, blocksHigh,
+            std::max(pitch / info.blockSize, blocksWide), (fetch[0] >> 31) != 0, (fetch[1] >> 6) & 3, blocks.data());
+
+        std::vector<uint8_t> texels(size_t(blocksWide) * info.blockSize * blocksHigh * info.blockSize * 4);
+        uint32_t texelsWide = blocksWide * info.blockSize;
+        for (uint32_t by = 0; by < blocksHigh; by++)
+            for (uint32_t bx = 0; bx < blocksWide; bx++)
+            {
+                const uint8_t* block = blocks.data() + (size_t(by) * blocksWide + bx) * info.bytesPerBlock;
+                uint8_t decoded[16][4];
+                if (rgba8)
+                {
+                    memcpy(decoded[0], block, 4);
+                }
+                else
+                {
+                    DecodeColorBlock(block + (dxt1 ? 0 : 8), !dxt1, decoded);
+                    if (dxt3)
+                    {
+                        for (int i = 0; i < 16; i++)
+                            decoded[i][3] = uint8_t(((block[i / 2] >> ((i & 1) * 4)) & 15) * 17);
+                    }
+                    else if (dxt5)
+                    {
+                        uint8_t a[8] = { block[0], block[1] };
+                        for (int i = 2; i < 8; i++)
+                            a[i] = a[0] > a[1] ? uint8_t(((8 - i) * a[0] + (i - 1) * a[1]) / 7)
+                                               : (i < 6 ? uint8_t(((6 - i) * a[0] + (i - 1) * a[1]) / 5) : (i == 6 ? 0 : 255));
+                        uint64_t bits = 0;
+                        for (int i = 0; i < 6; i++)
+                            bits |= uint64_t(block[2 + i]) << (i * 8);
+                        for (int i = 0; i < 16; i++)
+                            decoded[i][3] = a[(bits >> (i * 3)) & 7];
+                    }
+                }
+                for (uint32_t i = 0; i < info.blockSize * info.blockSize; i++)
+                {
+                    uint32_t x = bx * info.blockSize + i % info.blockSize, y = by * info.blockSize + i / info.blockSize;
+                    memcpy(&texels[(size_t(y) * texelsWide + x) * 4], decoded[i], 4);
+                }
+            }
+
+        // Crop to the texture's size and apply its swizzle (0-3: a component, 4: 0, 5: 1).
+        uint32_t swizzle = (fetch[3] >> 1) & 0xFFF;
+        rgba.resize(size_t(width) * height * 4);
+        for (uint32_t y = 0; y < height; y++)
+            for (uint32_t x = 0; x < width; x++)
+            {
+                const uint8_t* in = &texels[(size_t(y) * texelsWide + x) * 4];
+                uint8_t* out = &rgba[(size_t(y) * width + x) * 4];
+                for (int c = 0; c < 4; c++)
+                {
+                    uint32_t select = (swizzle >> (c * 3)) & 7;
+                    out[c] = select < 4 ? in[select] : (select == 4 ? 0 : 255);
+                }
+            }
+        return true;
+    }
+
     // Writes a game mesh as a .glb, for modders to see which mesh is which and to line
-    // their models up with; meshes.txt lists them all.
+    // their models up with, and its textures as PNGs; meshes.txt lists them all.
     void ExportMesh(uint64_t id, const VertexDeclaration& declaration, const MeshStream* streams, uint32_t count, const std::vector<uint32_t>& indices,
         int32_t baseVertex)
     {
@@ -2026,8 +2152,14 @@ namespace
         {
             uint32_t fetch[6];
             LoadFetchConstant(g_guestDevice + DEVICE_FETCH_CONSTANTS + i * 24, fetch);
-            if ((fetch[0] & 3) == 2)
-                textures += fmt::format(" {}:{}x{}", i, (fetch[2] & 0x1FFF) + 1, ((fetch[2] >> 13) & 0x1FFF) + 1);
+            if ((fetch[0] & 3) != 2)
+                continue;
+            textures += fmt::format(" {}:{}x{}", i, (fetch[2] & 0x1FFF) + 1, ((fetch[2] >> 13) & 0x1FFF) + 1);
+            uint32_t width = 0, height = 0;
+            std::vector<uint8_t> rgba;
+            if (ReadTextureRGBA(fetch, width, height, rgba))
+                stbi_write_png((directory / fmt::format("{:016x}_texture{}.png", id, i)).string().c_str(), int(width), int(height), 4, rgba.data(),
+                    int(width * 4));
         }
         std::ofstream list(directory / "meshes.txt", std::ios::app);
         list << fmt::format("{:016x}  {:6} vertices {:6} triangles  {}  size {:.3f} x {:.3f} x {:.3f}  textures{}\n", id, mesh.used.size(),
@@ -2035,11 +2167,12 @@ namespace
             textures.empty() ? " none" : textures);
     }
 
-    // A model fitted to one game mesh: its positions, and the game vertex each of its
-    // vertices takes its other attributes from.
+    // A model fitted to one game mesh: its positions and normals, and the game vertex each
+    // of its vertices takes its other attributes from.
     struct FittedModel
     {
         std::vector<float> positions;
+        std::vector<float> normals;
         std::vector<uint32_t> nearest;
     };
 
@@ -2053,6 +2186,77 @@ namespace
     ankerl::unordered_dense::map<uint64_t, ReplacementBuffers> g_replacementBuffers; // by mesh ID and declaration
     ankerl::unordered_dense::map<const mods::Model*, HostTexture> g_modTextures;
 
+    // Index of the nearest point (xyz triples) to p.
+    uint32_t NearestPoint(const std::vector<float>& points, const float* p, float* distance = nullptr)
+    {
+        float best = INFINITY;
+        uint32_t bestIndex = 0;
+        for (size_t i = 0; i < points.size() / 3; i++)
+        {
+            float dx = points[i * 3] - p[0], dy = points[i * 3 + 1] - p[1], dz = points[i * 3 + 2] - p[2];
+            float d = dx * dx + dy * dy + dz * dz;
+            if (d < best)
+                best = d, bestIndex = uint32_t(i);
+        }
+        if (distance != nullptr)
+            *distance = best;
+        return bestIndex;
+    }
+
+    // Turns the model a number of quarter turns about Y (up in glTF and in the game's meshes),
+    // then scales it to the game mesh's height and centres it on the game mesh.
+    void FitToBounds(FittedModel& fitted, uint32_t quarterTurns, const float gameMin[3], const float gameMax[3])
+    {
+        static constexpr float COS[4] = { 1, 0, -1, 0 }, SIN[4] = { 0, 1, 0, -1 };
+        float c = COS[quarterTurns & 3], s = SIN[quarterTurns & 3];
+        for (std::vector<float>* points : { &fitted.positions, &fitted.normals })
+            for (size_t i = 0; i + 2 < points->size(); i += 3)
+            {
+                float x = (*points)[i], z = (*points)[i + 2];
+                (*points)[i] = c * x + s * z;
+                (*points)[i + 2] = -s * x + c * z;
+            }
+
+        float modelMin[3] = { INFINITY, INFINITY, INFINITY }, modelMax[3] = { -INFINITY, -INFINITY, -INFINITY };
+        for (size_t i = 0; i + 2 < fitted.positions.size(); i += 3)
+            for (int j = 0; j < 3; j++)
+                modelMin[j] = std::min(modelMin[j], fitted.positions[i + j]), modelMax[j] = std::max(modelMax[j], fitted.positions[i + j]);
+        float modelHeight = modelMax[1] - modelMin[1];
+        float scale = modelHeight > 0.0f ? (gameMax[1] - gameMin[1]) / modelHeight : 1.0f;
+        for (size_t i = 0; i + 2 < fitted.positions.size(); i += 3)
+            for (int j = 0; j < 3; j++)
+            {
+                float& p = fitted.positions[i + j];
+                p = (p - (modelMin[j] + modelMax[j]) * 0.5f) * scale + (gameMin[j] + gameMax[j]) * 0.5f;
+            }
+    }
+
+    // How far apart two point sets are: the mean squared distance from each point to the
+    // nearest point of the other set, both ways, on up to 2000 points of each.
+    float ShapeDistance(const std::vector<float>& a, const std::vector<float>& b)
+    {
+        auto oneWay = [](const std::vector<float>& from, const std::vector<float>& to)
+            {
+                size_t count = from.size() / 3, step = std::max<size_t>(1, count / 2000);
+                std::vector<float> sample;
+                for (size_t i = 0; i < count; i += step)
+                    sample.insert(sample.end(), &from[i * 3], &from[i * 3] + 3);
+                std::vector<float> target;
+                size_t targetStep = std::max<size_t>(1, to.size() / 3 / 2000);
+                for (size_t i = 0; i < to.size() / 3; i += targetStep)
+                    target.insert(target.end(), &to[i * 3], &to[i * 3] + 3);
+                double total = 0.0;
+                for (size_t i = 0; i < sample.size() / 3; i++)
+                {
+                    float distance;
+                    NearestPoint(target, &sample[i * 3], &distance);
+                    total += distance;
+                }
+                return float(total / double(std::max<size_t>(1, sample.size() / 3)));
+            };
+        return oneWay(a, b) + oneWay(b, a);
+    }
+
     const FittedModel& FitModel(uint64_t id, const mods::MeshReplacement& replacement, const DecodedMesh& mesh)
     {
         FittedModel& fitted = g_fittedModels[id];
@@ -2060,62 +2264,54 @@ namespace
             return fitted;
 
         const mods::Model& model = *replacement.model;
-        fitted.positions = model.positions;
         uint32_t vertexCount = model.VertexCount();
-
-        if (replacement.fitBounds)
-        {
-            // Uniform scale so the model's extent matches the game mesh's along the game
-            // mesh's largest axis, then centre it on the game mesh.
-            float gameMin[3] = { INFINITY, INFINITY, INFINITY }, gameMax[3] = { -INFINITY, -INFINITY, -INFINITY };
-            float modelMin[3] = { INFINITY, INFINITY, INFINITY }, modelMax[3] = { -INFINITY, -INFINITY, -INFINITY };
-            for (uint32_t vertex : mesh.used)
-            {
-                const float* p = mesh.Get(mesh.position, vertex);
-                for (int j = 0; j < 3; j++)
-                    gameMin[j] = std::min(gameMin[j], p[j]), gameMax[j] = std::max(gameMax[j], p[j]);
-            }
-            for (uint32_t v = 0; v < vertexCount; v++)
-                for (int j = 0; j < 3; j++)
-                    modelMin[j] = std::min(modelMin[j], fitted.positions[v * 3 + j]), modelMax[j] = std::max(modelMax[j], fitted.positions[v * 3 + j]);
-            int axis = 0;
-            for (int j = 1; j < 3; j++)
-                if (gameMax[j] - gameMin[j] > gameMax[axis] - gameMin[axis])
-                    axis = j;
-            float modelExtent = modelMax[axis] - modelMin[axis];
-            float scale = modelExtent > 0.0f ? (gameMax[axis] - gameMin[axis]) / modelExtent : 1.0f;
-            for (uint32_t v = 0; v < vertexCount; v++)
-                for (int j = 0; j < 3; j++)
-                {
-                    float& p = fitted.positions[v * 3 + j];
-                    p = (p - (modelMin[j] + modelMax[j]) * 0.5f) * scale + (gameMin[j] + gameMax[j]) * 0.5f;
-                }
-        }
-
-        // Nearest game vertex of each model vertex. Done once per mesh, when it's first drawn.
         std::vector<float> game;
         game.reserve(mesh.used.size() * 3);
+        float gameMin[3] = { INFINITY, INFINITY, INFINITY }, gameMax[3] = { -INFINITY, -INFINITY, -INFINITY };
         for (uint32_t vertex : mesh.used)
         {
             const float* p = mesh.Get(mesh.position, vertex);
             game.insert(game.end(), p, p + 3);
+            for (int j = 0; j < 3; j++)
+                gameMin[j] = std::min(gameMin[j], p[j]), gameMax[j] = std::max(gameMax[j], p[j]);
         }
+
+        fitted.positions = model.positions;
+        fitted.normals = model.normals;
+        if (replacement.fitBounds)
+        {
+            // Models face all sorts of ways; keep the quarter turn that matches the game
+            // mesh's shape best (a belly where the belly is, and so on).
+            uint32_t bestTurns = 0;
+            float bestDistance = INFINITY;
+            for (uint32_t turns = 0; turns < 4; turns++)
+            {
+                FittedModel candidate{ model.positions, {} };
+                FitToBounds(candidate, turns, gameMin, gameMax);
+                float distance = ShapeDistance(candidate.positions, game);
+                if (distance < bestDistance)
+                    bestDistance = distance, bestTurns = turns;
+            }
+            FitToBounds(fitted, bestTurns, gameMin, gameMax);
+            if (bestTurns != 0)
+                LOGFN("Mods: {}: turned the model {} degrees to face the way the game mesh does", replacement.mod, bestTurns * 90);
+        }
+
+        // Nearest game vertex of each model vertex. Done once per mesh, when it's first drawn.
         fitted.nearest.resize(vertexCount);
         for (uint32_t v = 0; v < vertexCount; v++)
-        {
-            const float* p = &fitted.positions[v * 3];
-            float best = INFINITY;
-            uint32_t bestIndex = 0;
-            for (size_t g = 0; g < mesh.used.size(); g++)
-            {
-                float dx = game[g * 3] - p[0], dy = game[g * 3 + 1] - p[1], dz = game[g * 3 + 2] - p[2];
-                float distance = dx * dx + dy * dy + dz * dz;
-                if (distance < best)
-                    best = distance, bestIndex = uint32_t(g);
-            }
-            fitted.nearest[v] = mesh.used[bestIndex];
-        }
+            fitted.nearest[v] = mesh.used[NearestPoint(game, &fitted.positions[v * 3])];
         LOGFN("Mods: {} replaces mesh {:016x} ({} game vertices, {} model vertices)", replacement.mod, id, mesh.used.size(), vertexCount);
+
+        // With NB_MOD_EXPORT, the model as fitted, to compare with the exported game mesh.
+        if (g_exportFrame != 0)
+        {
+            auto directory = ModsPath() / "_export";
+            std::error_code ec;
+            std::filesystem::create_directories(directory, ec);
+            mods::WriteGlb(directory / fmt::format("{}_on_{:016x}.glb", replacement.mod, id), fitted.positions, fitted.normals, model.texcoords,
+                model.indices);
+        }
         return fitted;
     }
 
@@ -2158,8 +2354,8 @@ namespace
                         continue;
                     if (element.usage == D3DDECLUSAGE_POSITION)
                         memcpy(out, &fitted.positions[v * 3], 12);
-                    else if (element.usage == D3DDECLUSAGE_NORMAL && !model.normals.empty())
-                        memcpy(out, &model.normals[v * 3], 12);
+                    else if (element.usage == D3DDECLUSAGE_NORMAL && !fitted.normals.empty())
+                        memcpy(out, &fitted.normals[v * 3], 12);
                     else if (element.usage == D3DDECLUSAGE_TEXCOORD && !model.texcoords.empty())
                         memcpy(out, &model.texcoords[v * 2], 8);
                 }
@@ -2171,34 +2367,62 @@ namespace
         return &buffers;
     }
 
-    // The model's texture, uploaded on first use.
-    uint32_t GetModTexture(const mods::Model& model)
+    // Uploads an RGBA8 image into a new texture and gives it a descriptor.
+    uint32_t UploadRGBA(HostTexture& host, uint32_t width, uint32_t height, const uint8_t* pixels)
     {
-        if (auto it = g_modTextures.find(&model); it != g_modTextures.end())
-            return it->second.descriptorIndex;
-        HostTexture& host = g_modTextures[&model];
-        host.descriptorIndex = NULL_TEXTURE_2D;
-        uint64_t size = model.texture.size();
-        auto [memory, offset] = Allocate(size, 512);
-        if (memory == nullptr)
-            return NULL_TEXTURE_2D;
-        memcpy(memory, model.texture.data(), size);
+        size_t size = size_t(width) * height * 4;
+        auto& staging = g_modStagingBuffers.emplace_back(g_device->createBuffer(RenderBufferDesc::UploadBuffer(size)));
+        memcpy(staging->map(), pixels, size);
+        staging->unmap();
 
-        host.texture = g_device->createTexture(RenderTextureDesc::Texture2D(model.textureWidth, model.textureHeight, 1, RenderFormat::R8G8B8A8_UNORM));
+        host.texture = g_device->createTexture(RenderTextureDesc::Texture2D(width, height, 1, RenderFormat::R8G8B8A8_UNORM));
         RenderTextureViewDesc viewDesc = RenderTextureViewDesc::Texture2D(RenderFormat::R8G8B8A8_UNORM);
         viewDesc.mipLevels = 1;
         host.view = host.texture->createTextureView(viewDesc);
         RenderTextureBarrier toCopy(host.texture.get(), RenderTextureLayout::COPY_DEST);
         g_commandList->barriers(RenderBarrierStage::COPY, nullptr, 0, &toCopy, 1);
         g_commandList->copyTextureRegion(RenderTextureCopyLocation::Subresource(host.texture.get()),
-            RenderTextureCopyLocation::PlacedFootprint(g_uploadBuffer.get(), RenderFormat::R8G8B8A8_UNORM, model.textureWidth, model.textureHeight, 1,
-                model.textureWidth, offset));
+            RenderTextureCopyLocation::PlacedFootprint(staging.get(), RenderFormat::R8G8B8A8_UNORM, width, height, 1, width, 0));
         RenderTextureBarrier toRead(host.texture.get(), RenderTextureLayout::SHADER_READ);
         g_commandList->barriers(RenderBarrierStage::GRAPHICS, nullptr, 0, &toRead, 1);
         g_framebufferBound = false;
         host.descriptorIndex = AllocateTextureDescriptor();
         g_textureDescriptorSet->setTexture(host.descriptorIndex, host.texture.get(), RenderTextureLayout::SHADER_READ, host.view.get());
         return host.descriptorIndex;
+    }
+
+    // The model's texture, uploaded on first use.
+    uint32_t GetModTexture(const mods::Model& model)
+    {
+        if (auto it = g_modTextures.find(&model); it != g_modTextures.end())
+            return it->second.descriptorIndex;
+        if (model.texture.empty())
+            return NULL_TEXTURE_2D;
+        return UploadRGBA(g_modTextures[&model], model.textureWidth, model.textureHeight, model.texture.data());
+    }
+
+    // A small texture of one colour (RGBA, red in the low byte).
+    ankerl::unordered_dense::map<uint32_t, HostTexture> g_solidTextures;
+
+    uint32_t GetSolidTexture(uint32_t rgba)
+    {
+        if (auto it = g_solidTextures.find(rgba); it != g_solidTextures.end())
+            return it->second.descriptorIndex;
+        uint32_t pixels[16];
+        std::fill(std::begin(pixels), std::end(pixels), rgba);
+        return UploadRGBA(g_solidTextures[rgba], 4, 4, (const uint8_t*)pixels);
+    }
+
+    uint32_t GetReplacementTexture(mods::TextureSource source, const mods::Model& model)
+    {
+        switch (source)
+        {
+        case mods::TextureSource::Model: return GetModTexture(model);
+        case mods::TextureSource::FlatNormal: return GetSolidTexture(0xFFFF8080);
+        case mods::TextureSource::Black: return GetSolidTexture(0xFF000000);
+        case mods::TextureSource::White: return GetSolidTexture(0xFFFFFFFF);
+        default: return NULL_TEXTURE_2D;
+        }
     }
 
     struct DrawCall
@@ -2388,6 +2612,8 @@ namespace
         {
             struct { uint64_t vertices, indices; int64_t baseVertex; } meshKey{ meshHash, XXH3_64bits(indices.data(), indices.size() * 4), call.baseVertex };
             uint64_t meshId = XXH3_64bits(&meshKey, sizeof(meshKey));
+            if (DebugThisFrame())
+                LOGF_IMPL(Utility, "draw", "  mesh {:016x} (vertices {:016x}){}", meshId, meshHash, mods::FindMesh(meshId) != nullptr ? " replaced" : "");
             if (exporting)
                 ExportMesh(meshId, *declaration, meshStreams, meshStreamCount, indices, call.baseVertex);
             replacement = mods::FindMesh(meshId);
@@ -2438,8 +2664,12 @@ namespace
             shared.textureCubeIndices[i] = NULL_TEXTURE_CUBE;
             shared.samplerIndices[i] = (fetch[0] & 3) == 2 ? GetSamplerIndex(fetch) : SAMPLER_DEFAULT;
         }
-        if (replacement != nullptr && replacement->textureSlot >= 0 && replacement->textureSlot < 16 && !replacement->model->texture.empty())
-            shared.texture2DIndices[replacement->textureSlot] = GetModTexture(*replacement->model);
+        if (replacement != nullptr)
+        {
+            for (uint32_t i = 0; i < 16; i++)
+                if (replacement->textures[i] != mods::TextureSource::Game)
+                    shared.texture2DIndices[i] = GetReplacementTexture(replacement->textures[i], *replacement->model);
+        }
         uint32_t vsBooleans = Load32(g_guestDevice + DEVICE_BOOL_CONSTANTS);
         uint32_t psBooleans = Load32(g_guestDevice + DEVICE_BOOL_CONSTANTS + 16);
         shared.booleans = (vsBooleans & 0xFFFF) | (psBooleans << 16);
