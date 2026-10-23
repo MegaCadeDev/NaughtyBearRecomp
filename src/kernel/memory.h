@@ -8,6 +8,7 @@
 struct Memory
 {
     uint8_t* base{};
+    std::string error; // why base is null (the constructor runs before logging starts)
 
     Memory();
 

@@ -13,6 +13,7 @@
 #include <kernel/xam.h>
 #include <kernel/xex_modules.h>
 #include <os/logger.h>
+#include <os/process.h>
 #include <user/paths.h>
 #if !defined(__PROSPERO__)
 #include <ui/launcher.h>
@@ -63,11 +64,24 @@ static void OnCrash(int sig, siginfo_t* info, void*)
 {
     auto addr = reinterpret_cast<uintptr_t>(info->si_addr);
     auto base = reinterpret_cast<uintptr_t>(g_memory.base);
+    char message[160];
     if (addr >= base && addr < base + PPC_MEMORY_SIZE)
-        fprintf(stderr, "\n[nb] signal %d: guest memory access at 0x%08llX\n", sig, (unsigned long long)(addr - base));
+        snprintf(message, sizeof(message), "signal %d: guest memory access at 0x%08llX", sig, (unsigned long long)(addr - base));
     else
-        fprintf(stderr, "\n[nb] signal %d: host address %p\n", sig, info->si_addr);
-    _exit(128 + sig);
+        snprintf(message, sizeof(message), "signal %d: host address %p", sig, info->si_addr);
+    fprintf(stderr, "\n[nb] %s\n", message);
+#if defined(__PROSPERO__)
+    os::process::ShowMessage(std::string("Naughty Bear Recompiled crashed (") + message + "). See /data/NaughtyBearRecomp/log.txt");
+#endif
+    os::process::Exit(128 + sig);
+}
+
+// Logs a fatal error, shows it to the player and ends.
+[[noreturn]] static void Fail(const std::string& message)
+{
+    LOGN_ERROR(message);
+    os::process::ShowMessage("Naughty Bear Recompiled: " + message);
+    os::process::Exit(EXIT_FAILURE);
 }
 
 static void InstallCrashHandler()
@@ -75,7 +89,7 @@ static void InstallCrashHandler()
     struct sigaction sa{};
     sa.sa_sigaction = OnCrash;
     sa.sa_flags = SA_SIGINFO;
-    for (int sig : { SIGSEGV, SIGBUS, SIGILL, SIGTRAP, SIGFPE })
+    for (int sig : { SIGSEGV, SIGBUS, SIGILL, SIGTRAP, SIGFPE, SIGSYS })
         sigaction(sig, &sa, nullptr);
 }
 
@@ -222,11 +236,10 @@ int main(int argc, char** argv)
         if (xexPath.empty())
         {
 #if defined(__PROSPERO__)
-            LOGN_ERROR("Could not find the game: put its files (with Default.xex) in /data/NaughtyBearRecomp/game.");
+            Fail("Could not find the game: put its files (with Default.xex) in /data/NaughtyBearRecomp/game.");
 #else
-            LOGN_ERROR("Could not find the game: put its files (with Default.xex) in a \"game\" folder next to the executable.");
+            Fail("Could not find the game: put its files (with Default.xex) in a \"game\" folder next to the executable.");
 #endif
-            return EXIT_FAILURE;
         }
 #if !defined(__PROSPERO__)
         for (auto dir = xexPath.parent_path(); dir.has_relative_path(); dir = dir.parent_path())
@@ -241,36 +254,27 @@ int main(int argc, char** argv)
     }
     g_gamePath = std::filesystem::absolute(xexPath).parent_path();
 
-    if (g_memory.base == nullptr)
-    {
-        LOGN_ERROR("Could not reserve the 4 GB guest address space.");
-        return EXIT_FAILURE;
-    }
-
     InstallCrashHandler();
+    if (g_memory.base == nullptr)
+        Fail("Could not reserve the 4 GB guest address space (" + g_memory.error + ").");
+
     KiSystemStartup();
 
     uint32_t entry = LdrLoadModule(xexPath);
     if (entry == 0)
-    {
-        LOGFN_ERROR("Could not load {}", xexPath.string());
-        return EXIT_FAILURE;
-    }
+        Fail("Could not load " + xexPath.string());
 
 #if defined(__PROSPERO__)
     // No window or mods menu: the renderer presents straight to the display. The main
     // thread applies rumble; the game runs on its own thread.
     if (!Video::Init(nullptr))
-    {
-        LOGN_ERROR("Could not start the renderer.");
-        return EXIT_FAILURE;
-    }
+        Fail("Could not start the renderer.");
     hid::Init();
     StartHostThread([entry]
         {
             GuestThread::Start({ entry, 0, 0 });
             LOGN("Entry point returned.");
-            _exit(EXIT_SUCCESS);
+            os::process::Exit(EXIT_SUCCESS);
         });
     while (true)
     {
@@ -280,10 +284,7 @@ int main(int argc, char** argv)
 #else
     // SDL wants its window and events on the main thread, so the game gets its own.
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMECONTROLLER) != 0)
-    {
-        LOGFN_ERROR("SDL_Init failed: {}", SDL_GetError());
-        return EXIT_FAILURE;
-    }
+        Fail(fmt::format("SDL_Init failed: {}", SDL_GetError()));
     if (!skipModsMenu && !launcher::Run(g_userPath / "mods", forceModsMenu))
         return EXIT_SUCCESS;
 
@@ -297,10 +298,7 @@ int main(int argc, char** argv)
     if (window != nullptr)
         SDL_SetWindowMinimumSize(window, 320, 180);
     if (window == nullptr || !Video::Init(window))
-    {
-        LOGFN_ERROR("Could not create the game window: {}", SDL_GetError());
-        return EXIT_FAILURE;
-    }
+        Fail(fmt::format("Could not create the game window: {}", SDL_GetError()));
 
     hid::Init();
 
