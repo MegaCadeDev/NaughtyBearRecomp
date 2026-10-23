@@ -92,6 +92,36 @@ target_precompile_headers(nb_shader_translator PRIVATE ${XENOS_DIR}/pch.h)
 target_compile_options(nb_shader_translator PRIVATE -Wno-switch -Wno-unused-variable -Wno-null-arithmetic -fms-extensions)
 target_link_libraries(nb_shader_translator PUBLIC dxcompiler PRIVATE fmt::fmt xxHash::xxhash smolv libzstd_static)
 
+# Builds the shader cache from the game's files without running the game, for the PS5
+# build (tools/shader_precache). It reads the data packages with libmspack's LZX decoder,
+# copied here without the padding step after odd-sized uncompressed blocks, which XMem's
+# LZX streams don't have (see tools/shader_precache/xmem_lzx.cpp).
+set(MSPACK_DIR ${CMAKE_SOURCE_DIR}/tools/XenonRecomp/thirdparty/libmspack/libmspack/mspack)
+file(READ ${MSPACK_DIR}/lzxd.c LZXD_SOURCE)
+set(LZXD_PADDING "        if ((lzx->block_type == LZX_BLOCKTYPE_UNCOMPRESSED) &&
+            (lzx->block_length & 1))
+        {
+          READ_IF_NEEDED;
+          i_ptr++;
+        }")
+string(FIND "${LZXD_SOURCE}" "${LZXD_PADDING}" LZXD_PADDING_AT)
+if (LZXD_PADDING_AT EQUAL -1)
+    message(FATAL_ERROR "libmspack's lzxd.c changed: update the XMem copy in CMakeLists.txt")
+endif()
+string(REPLACE "${LZXD_PADDING}" "        /* XMem: no padding byte after an odd-sized uncompressed block */" LZXD_SOURCE "${LZXD_SOURCE}")
+file(WRITE ${CMAKE_BINARY_DIR}/xmem/xmem_lzxd.c.tmp "${LZXD_SOURCE}")
+configure_file(${CMAKE_BINARY_DIR}/xmem/xmem_lzxd.c.tmp ${CMAKE_BINARY_DIR}/xmem/xmem_lzxd.c COPYONLY)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${MSPACK_DIR}/lzxd.c)
+
+add_executable(nb_shader_precache tools/shader_precache/main.cpp tools/shader_precache/xmem_lzx.cpp ${CMAKE_BINARY_DIR}/xmem/xmem_lzxd.c)
+target_compile_definitions(nb_shader_precache PRIVATE lzxd_init=xmem_lzxd_init lzxd_decompress=xmem_lzxd_decompress lzxd_free=xmem_lzxd_free
+    lzxd_set_output_length=xmem_lzxd_set_output_length lzxd_set_reference_data=xmem_lzxd_set_reference_data)
+target_include_directories(nb_shader_precache PRIVATE src tools/XenosRecomp/thirdparty/zstd/lib ${MSPACK_DIR})
+target_link_libraries(nb_shader_precache PRIVATE nb_shader_translator XenonUtils fmt::fmt xxHash::xxhash libzstd_static)
+set_target_properties(nb_shader_precache PROPERTIES BUILD_RPATH "$ORIGIN" INSTALL_RPATH "$ORIGIN")
+add_custom_command(TARGET nb_shader_precache POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DXC_DIR}/lib/x64/libdxcompiler.so $<TARGET_FILE_DIR:nb_shader_precache>)
+
 add_library(o1heap STATIC thirdparty/o1heap/o1heap.c)
 target_include_directories(o1heap PUBLIC thirdparty/o1heap)
 

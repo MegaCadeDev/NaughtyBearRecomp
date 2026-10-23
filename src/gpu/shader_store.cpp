@@ -1,5 +1,6 @@
 #include <stdafx.h>
 #include "shader_store.h"
+#include "shader_cache_file.h"
 #if defined(__PROSPERO__)
 // No translator on the PS5 (it needs DXC): shaders come from the PC version's cache.
 namespace shader_translator
@@ -26,19 +27,9 @@ namespace shader_store
 {
     namespace
     {
-        // File: header, then the zstd-compressed entries (hash, specialization mask, size, SPIR-V).
-        constexpr uint32_t CACHE_MAGIC = 0x4853424E; // "NBSH"
-        constexpr uint32_t CACHE_FORMAT = 1;
-
-        struct CacheHeader
-        {
-            uint32_t magic;
-            uint32_t format;
-            uint64_t translatorVersion;
-            uint64_t dataFingerprint; // the game data the cache was precached from, 0 if not yet
-            uint32_t count;
-            uint32_t uncompressedSize;
-        };
+        using CacheHeader = shader_cache_file::Header;
+        constexpr uint32_t CACHE_MAGIC = shader_cache_file::MAGIC;
+        constexpr uint32_t CACHE_FORMAT = shader_cache_file::FORMAT;
 
         std::mutex g_mutex;
         ankerl::unordered_dense::map<uint64_t, std::unique_ptr<Shader>> g_shaders;
@@ -60,65 +51,18 @@ namespace shader_store
         }
 #endif
 
-        // Identifies the game data: names, sizes and times of the packages and the executable.
         uint64_t DataFingerprint()
         {
-            std::vector<std::string> entries;
-            std::error_code ec;
-            for (const auto& entry : std::filesystem::directory_iterator(GetGamePath() / "lu", ec))
-            {
-                auto time = entry.last_write_time(ec).time_since_epoch().count();
-                entries.push_back(fmt::format("{}:{}:{}", entry.path().filename().string(), entry.file_size(ec), time));
-            }
-            auto xex = GetGamePath() / "Default.xex";
-            entries.push_back(fmt::format("xex:{}", std::filesystem::file_size(xex, ec)));
-            std::sort(entries.begin(), entries.end());
-            std::string joined;
-            for (const auto& entry : entries)
-                joined += entry + "\n";
-            return XXH3_64bits(joined.data(), joined.size()) | 1;
+            return shader_cache_file::DataFingerprint(GetGamePath());
         }
 
         void Save()
         {
-            std::vector<uint8_t> body;
-            uint32_t count = 0;
-            uint64_t fingerprint;
-            {
-                std::lock_guard lock(g_mutex);
-                fingerprint = g_dataFingerprint;
-                for (const auto& [hash, shader] : g_shaders)
-                {
-                    uint32_t size = uint32_t(shader->spirv.size());
-                    size_t offset = body.size();
-                    body.resize(offset + 16 + size);
-                    memcpy(body.data() + offset, &hash, 8);
-                    memcpy(body.data() + offset + 8, &shader->specConstantsMask, 4);
-                    memcpy(body.data() + offset + 12, &size, 4);
-                    memcpy(body.data() + offset + 16, shader->spirv.data(), size);
-                    count++;
-                }
-            }
-
-            std::vector<uint8_t> compressed(ZSTD_compressBound(body.size()));
-            size_t compressedSize = ZSTD_compress(compressed.data(), compressed.size(), body.data(), body.size(), 6);
-            if (ZSTD_isError(compressedSize))
-                return;
-
-            CacheHeader header{ CACHE_MAGIC, CACHE_FORMAT, shader_translator::Version(), fingerprint, count, uint32_t(body.size()) };
-            auto path = CachePath();
-            std::error_code ec;
-            std::filesystem::create_directories(path.parent_path(), ec);
-            auto temporary = path;
-            temporary += ".tmp";
-            {
-                std::ofstream file(temporary, std::ios::binary);
-                file.write((const char*)&header, sizeof(header));
-                file.write((const char*)compressed.data(), compressedSize);
-                if (!file)
-                    return;
-            }
-            std::filesystem::rename(temporary, path, ec);
+            std::lock_guard lock(g_mutex);
+            std::vector<shader_cache_file::Entry> entries;
+            for (const auto& [hash, shader] : g_shaders)
+                entries.push_back({ hash, shader->specConstantsMask, &shader->spirv });
+            shader_cache_file::Write(CachePath(), shader_translator::Version(), g_dataFingerprint, entries);
         }
 
         // Saves the cache in the background whenever shaders were added.
@@ -144,18 +88,7 @@ namespace shader_store
         // Finds the shader containers in data (no copies of ones already cached or seen).
         void Scan(const uint8_t* data, size_t size, std::map<uint64_t, std::vector<uint8_t>>& found)
         {
-            for (size_t i = 0; i + 64 <= size; i += 4)
-            {
-                if (data[i] != 0x10 || data[i + 1] != 0x2A || data[i + 2] != 0x11)
-                    continue;
-                size_t containerSize = shader_translator::ContainerSize(data + i, size - i);
-                if (containerSize == 0)
-                    continue;
-                uint64_t hash = XXH3_64bits(data + i, containerSize);
-                if (!found.count(hash) && Find(hash) == nullptr)
-                    found.emplace(hash, std::vector<uint8_t>(data + i, data + i + containerSize));
-                i += (containerSize & ~size_t(3)) - 4;
-            }
+            shader_cache_file::Scan(data, size, shader_translator::ContainerSize, [](uint64_t hash) { return Find(hash) != nullptr; }, found);
         }
     }
 
