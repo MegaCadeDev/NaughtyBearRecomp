@@ -8,7 +8,7 @@ It's a homebrew title for a jailbroken console, not a retail package. It include
 files: you need your own copy of the Xbox 360 game, as for the PC version. Mods aren't
 supported on the PS5.
 
-**Status:** boots on a console; in testing.
+**Status:** runs on a console: boots, plays, takes DualSense input and translates its own shaders.
 
 ## What you need
 
