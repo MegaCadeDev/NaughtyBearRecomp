@@ -4,7 +4,8 @@
 #   make deploy PS5_HOST=<ip>     build, then copy it to /data/homebrew/PPSA99862 over FTP
 #   make launch PS5_HOST=<ip>     start it (sends a launcher payload to port 9021)
 #   make close PS5_HOST=<ip>      close it
-#   make undeploy PS5_HOST=<ip>   remove it from the console
+#   make undeploy PS5_HOST=<ip>   remove it from the console (with the game files and saves
+#                                 in its folder)
 SHELL := /bin/bash
 .DEFAULT_GOAL := app
 

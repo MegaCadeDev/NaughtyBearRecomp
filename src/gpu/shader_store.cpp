@@ -52,14 +52,10 @@ namespace shader_store
 
 #if defined(__PROSPERO__)
         // The PS5 can't translate shaders (the translator needs DXC): it uses the cache the PC
-        // version built from the same game files, copied to /data/NaughtyBearRecomp/cache or
-        // packaged with the title.
+        // version built from the same game files, packaged with the title (its cache folder
+        // is the title's own).
         std::filesystem::path FindCache()
         {
-            std::error_code ec;
-            for (auto path : { CachePath(), std::filesystem::path("/app0/cache/shaders.bin") })
-                if (std::filesystem::exists(path, ec))
-                    return path;
             return CachePath();
         }
 #endif

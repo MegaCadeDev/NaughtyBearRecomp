@@ -41,13 +41,15 @@ supported on the PS5.
    make -C ps5 deploy PS5_HOST=192.168.1.50
    ```
 
-2. Copy the game's files (the folder with `Default.xex`, `lu/`, `streams/` and the rest) to
-   `/data/NaughtyBearRecomp/game` on the console.
+2. Copy the game's files (the folder with `Default.xex`, `lu/`, `streams/` and the rest) into
+   the title's `game` folder: `/data/homebrew/PPSA99862/game` on the console.
 3. Start Naughty Bear Recompiled from the homebrew launcher (or `make -C ps5 launch
    PS5_HOST=...`, which sends a launcher payload to port 9021).
 
-Saves go to `/data/NaughtyBearRecomp/save`, and the log to
-`/data/NaughtyBearRecomp/log.txt`; please include the log when reporting a problem.
+Everything stays in the title's folder (a title can't write to `/data` outside it): saves
+go to `/data/homebrew/PPSA99862/save`, and the log to `/data/homebrew/PPSA99862/log.txt`;
+please include the log when reporting a problem. Deploying an update doesn't remove the
+game files or saves, but `make -C ps5 undeploy` deletes the whole folder, them included.
 
 ## Controls
 

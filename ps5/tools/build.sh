@@ -99,6 +99,9 @@ rm -rf -- "$DIST"
 mkdir -p "$DIST/sce_sys" "$DIST/sce_module"
 "$NATIVE_TOOL" self --sign --in "$BUILD/eboot.elf" --out "$DIST/eboot.bin" --magic "$FSELF_MAGIC"
 cp "$ROOT/sce_sys/param.json" "$ROOT/sce_sys/icon0.png" "$DIST/sce_sys/"
+# The game's files go in the title's game folder; a note keeps the folder in the deployment.
+mkdir -p "$DIST/game"
+printf 'Copy the game'"'"'s files here: the folder with Default.xex, lu/, streams/ and the rest.\n' > "$DIST/game/PUT_GAME_FILES_HERE.txt"
 [[ -f $ROOT/runtime/libc.prx ]] || bash "$ROOT/tools/rebuild-libc.sh"
 cp "$ROOT/runtime/libc.prx" "$DIST/sce_module/libc.prx"
 # The shader cache comes from the PC version, built from the same game files (it's derived

@@ -46,10 +46,11 @@ std::filesystem::path& GetGamePath()
 }
 
 // Saves and the shader cache live next to the "game" folder (the working directory when
-// the game's path is given on the command line). On the PS5, everything is in one folder
-// of the console's storage.
+// the game's path is given on the command line). On the PS5, everything is in the title's
+// own folder (/data/homebrew/PPSA99862, which it sees as /app0): a title can't write to
+// /data outside it.
 #if defined(__PROSPERO__)
-static const std::filesystem::path PS5_USER_PATH = "/data/NaughtyBearRecomp";
+static const std::filesystem::path PS5_USER_PATH = "/app0";
 static std::filesystem::path g_userPath = PS5_USER_PATH;
 #else
 static std::filesystem::path g_userPath = std::filesystem::current_path();
@@ -71,7 +72,7 @@ static void OnCrash(int sig, siginfo_t* info, void*)
         snprintf(message, sizeof(message), "signal %d: host address %p", sig, info->si_addr);
     fprintf(stderr, "\n[nb] %s\n", message);
 #if defined(__PROSPERO__)
-    os::process::ShowMessage(std::string("Naughty Bear Recompiled crashed (") + message + "). See /data/NaughtyBearRecomp/log.txt");
+    os::process::ShowMessage(std::string("Naughty Bear Recompiled crashed (") + message + "). See log.txt in its folder.");
 #endif
     os::process::Exit(128 + sig);
 }
@@ -151,14 +152,14 @@ static uint32_t LdrLoadModule(const std::filesystem::path& path)
 }
 
 // Finds Default.xex in a "game" folder (searched with its subfolders) next to the executable,
-// in the working directory, or in a parent of the executable's folder. On the PS5, in
-// /data/NaughtyBearRecomp/game, or a game folder in the title's own folder.
+// in the working directory, or in a parent of the executable's folder. On the PS5, in the
+// game folder in the title's own folder.
 static std::filesystem::path FindGameExecutable()
 {
     std::error_code ec;
     std::vector<std::filesystem::path> roots;
 #if defined(__PROSPERO__)
-    roots = { PS5_USER_PATH / "game", "/app0/game" };
+    roots = { PS5_USER_PATH / "game" };
 #else
     auto executableDir = std::filesystem::read_symlink("/proc/self/exe", ec).parent_path();
     if (!ec)
@@ -237,7 +238,7 @@ int main(int argc, char** argv)
         if (xexPath.empty())
         {
 #if defined(__PROSPERO__)
-            Fail("Could not find the game: copy its files (the folder with Default.xex) into /data/NaughtyBearRecomp/game.");
+            Fail("Could not find the game: copy its files (the folder with Default.xex) into /data/homebrew/PPSA99862/game.");
 #else
             Fail("Could not find the game: put its files (with Default.xex) in a \"game\" folder next to the executable.");
 #endif
