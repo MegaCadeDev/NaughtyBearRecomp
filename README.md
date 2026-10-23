@@ -90,6 +90,13 @@ Set as environment variables:
 | `NB_FPS=n` | Pace frames to `n` fps instead of the game's 30 |
 | `NB_WINDOW_SIZE=WxH` | Starting window size (default 1280x720) |
 
+### Mods
+
+Models from a `mods/` folder (next to the `game` folder) can replace the game's: each mod is
+a folder with a `mod.toml` and its `.glb` models. The project includes and distributes no
+mods; making them, and having the rights to what's in them, is up to their authors. See
+[docs/modding.md](docs/modding.md).
+
 Debugging:
 
 | Variable | Effect |
@@ -104,6 +111,7 @@ Debugging:
 | `NB_DUMP_SHADERS=dir` | Write the shader containers the game creates |
 | `NB_AUDIO_DUMP=file.wav` | Record the audio output |
 | `NB_DEBUG_XMA=1` | Log XMA decoder statistics |
+| `NB_MOD_EXPORT=frame` | Write every mesh drawn in that frame to `mods/_export/` as `.glb`, with their mesh IDs (for modding) |
 | `NB_LOG_FILES=1` | Log every file the game opens |
 
 ## Building
@@ -135,6 +143,7 @@ with the runtime, and builds FFmpeg's XMA decoder from `thirdparty/FFmpeg`.
 | `src/gpu/` | The renderer (`video.cpp`), headless GPU, shader translation and cache |
 | `src/apu/` | Audio output and the XMA decoder |
 | `src/hid/` | Controller and keyboard input |
+| `src/mods/` | Mod support: `mod.toml` files and glTF models |
 | `config/` | XenonRecomp configuration for the game (`NB.toml`, jump tables) |
 | `patches/` | Patches to the submodules (XenonRecomp, XenosRecomp, plume, FFmpeg) |
 | `tools/` | Recompilation and shader scripts; `tools/nbanalyse` has the reverse-engineering tools |

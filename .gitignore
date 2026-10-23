@@ -21,3 +21,6 @@ save/
 
 # Translated shader cache (written on first run)
 /cache/
+
+# Mods are the players' own; none ship with the project (docs/modding.md)
+/mods/

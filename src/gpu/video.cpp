@@ -16,7 +16,9 @@
 #include <gpu/video.h>
 #include <hid/hid.h>
 #include <kernel/memory.h>
+#include <mods/mods.h>
 #include <os/logger.h>
+#include <user/paths.h>
 #include <plume_render_interface.h>
 #include <bit>
 
@@ -280,6 +282,8 @@ namespace
         uint32_t type;
         ElementClass elementClass;
         uint8_t location;
+        uint8_t usage;
+        uint8_t usageIndex;
     };
 
     // The elements of one vertex stream, in host order (16 bytes each).
@@ -690,7 +694,7 @@ namespace
             StreamLayout& layout = layouts[streamIndex[stream]];
             ElementClass elementClass = GetElementClass(usage);
             uint32_t hostOffset = layout.HostStride();
-            layout.elements.push_back({ offset, type, elementClass, uint8_t(location) });
+            layout.elements.push_back({ offset, type, elementClass, uint8_t(location), usage, usageIndex });
 
             RenderFormat format = elementClass == ElementClass::Float ? RenderFormat::R32G32B32A32_FLOAT : RenderFormat::R32G32B32A32_UINT;
             declaration.inputElements.emplace_back(ConvertDeclUsage(usage), usageIndex, location, format, stream, hostOffset);
@@ -727,7 +731,8 @@ namespace
 
     ankerl::unordered_dense::map<uint64_t, HostVertexBuffer> g_vertexBuffers;
 
-    const RenderBuffer* GetVertexBuffer(const StreamLayout& layout, uint32_t address, uint32_t sizeBytes, uint32_t stride, uint32_t& vertexCount)
+    const RenderBuffer* GetVertexBuffer(const StreamLayout& layout, uint32_t address, uint32_t sizeBytes, uint32_t stride, uint32_t& vertexCount,
+        uint64_t& contentHash)
     {
         vertexCount = sizeBytes / stride;
         if (vertexCount == 0)
@@ -737,10 +742,13 @@ namespace
         uint64_t key = XXH3_64bits(&keyData, sizeof(keyData));
         HostVertexBuffer& entry = g_vertexBuffers[key];
         if (entry.checkedFrame == g_frameIndex && entry.buffer)
+        {
+            contentHash = entry.contentHash;
             return entry.buffer.get();
+        }
 
         const uint8_t* source = (const uint8_t*)g_memory.Translate(address);
-        uint64_t contentHash = XXH3_64bits(source, sizeBytes);
+        contentHash = XXH3_64bits(source, sizeBytes);
         entry.checkedFrame = g_frameIndex;
         if (entry.buffer && entry.contentHash == contentHash)
             return entry.buffer.get();
@@ -1866,6 +1874,333 @@ namespace
 
     // ---- Draws ----
 
+    // ---- Mods: replacement models (src/mods, docs/modding.md) ----
+    //
+    // A mesh is identified by the contents of its vertex buffers and the indices of the draw,
+    // so the ID stays the same wherever the game loads it. A replacement model is drawn with
+    // the game's own shaders: each of its vertices takes position, normal and texture
+    // coordinates from the model, and everything else (bone indices and weights, colours,
+    // tangents) from the nearest vertex of the game's mesh. That way it moves with the game
+    // mesh's skeleton without being rigged for it.
+
+    // A vertex stream holding mesh data (not a small per-draw stream).
+    struct MeshStream
+    {
+        uint32_t layout; // index in the declaration's streams
+        uint32_t address;
+        uint32_t size;
+        uint32_t stride;
+    };
+
+    // NB_MOD_EXPORT=frame writes every mesh drawn in that frame to mods/_export/frame<N>/.
+    const uint64_t g_exportFrame = [] { const char* v = getenv("NB_MOD_EXPORT"); return v ? std::stoull(v) : 0ull; }();
+    ankerl::unordered_dense::set<uint64_t> g_exportedMeshes;
+
+    bool ExportThisFrame() { return g_exportFrame != 0 && g_presentedFrames + 1 == g_exportFrame; }
+
+    std::filesystem::path ModsPath() { return GetSavePath(false).parent_path() / "mods"; }
+
+    // A game mesh's vertices decoded to host rows, one array per mesh stream.
+    struct DecodedMesh
+    {
+        std::vector<std::vector<uint8_t>> rows;
+        std::vector<uint32_t> rowSizes;
+        uint32_t vertexCount = ~0u;
+        std::vector<uint32_t> used; // vertices the draw references (base vertex applied)
+
+        struct Element { int32_t stream = -1; uint32_t offset = 0; };
+        Element position, normal, texcoord;
+        bool skinned = false;
+
+        const float* Get(const Element& element, uint32_t vertex) const
+        {
+            return (const float*)(rows[element.stream].data() + size_t(vertex) * rowSizes[element.stream] + element.offset);
+        }
+    };
+
+    bool DecodeMesh(const VertexDeclaration& declaration, const MeshStream* streams, uint32_t count, const std::vector<uint32_t>& indices,
+        int32_t baseVertex, DecodedMesh& mesh)
+    {
+        for (uint32_t k = 0; k < count; k++)
+        {
+            const StreamLayout& layout = declaration.streams[streams[k].layout];
+            uint32_t vertexCount = streams[k].size / streams[k].stride;
+            mesh.vertexCount = std::min(mesh.vertexCount, vertexCount);
+            mesh.rowSizes.push_back(layout.HostStride());
+            auto& rows = mesh.rows.emplace_back(size_t(vertexCount) * layout.HostStride());
+            DecodeVertices(layout, (const uint8_t*)g_memory.Translate(streams[k].address), streams[k].stride, vertexCount, rows.data());
+            for (uint32_t e = 0; e < layout.elements.size(); e++)
+            {
+                const ElementDecode& element = layout.elements[e];
+                DecodedMesh::Element* target = nullptr;
+                if (element.usage == D3DDECLUSAGE_POSITION && element.usageIndex == 0)
+                    target = &mesh.position;
+                else if (element.usage == D3DDECLUSAGE_NORMAL && element.usageIndex == 0)
+                    target = &mesh.normal;
+                else if (element.usage == D3DDECLUSAGE_TEXCOORD && element.usageIndex == 0)
+                    target = &mesh.texcoord;
+                else if (element.usage == D3DDECLUSAGE_BLENDINDICES)
+                    mesh.skinned = true;
+                if (target != nullptr)
+                    *target = { int32_t(k), e * 16 };
+            }
+        }
+        if (mesh.position.stream < 0)
+            return false;
+
+        std::vector<bool> seen(mesh.vertexCount);
+        for (uint32_t index : indices)
+        {
+            int64_t vertex = int64_t(index) + baseVertex;
+            if (vertex >= 0 && vertex < mesh.vertexCount && !seen[vertex])
+            {
+                seen[vertex] = true;
+                mesh.used.push_back(uint32_t(vertex));
+            }
+        }
+        return !mesh.used.empty();
+    }
+
+    // Writes a game mesh as a .glb, for modders to see which mesh is which and to line
+    // their models up with; meshes.txt lists them all.
+    void ExportMesh(uint64_t id, const VertexDeclaration& declaration, const MeshStream* streams, uint32_t count, const std::vector<uint32_t>& indices,
+        int32_t baseVertex)
+    {
+        if (!g_exportedMeshes.insert(id).second)
+            return;
+        DecodedMesh mesh;
+        if (!DecodeMesh(declaration, streams, count, indices, baseVertex, mesh))
+            return;
+
+        auto directory = ModsPath() / "_export" / fmt::format("frame{}", g_exportFrame);
+        std::error_code ec;
+        std::filesystem::create_directories(directory, ec);
+        if (g_exportedMeshes.size() == 1)
+            LOGFN("Mods: writing the meshes of frame {} to {}", g_exportFrame, directory.string());
+
+        std::vector<uint32_t> remap(mesh.vertexCount, ~0u);
+        std::vector<float> positions, normals, texcoords;
+        float minimum[3] = { INFINITY, INFINITY, INFINITY }, maximum[3] = { -INFINITY, -INFINITY, -INFINITY };
+        for (uint32_t vertex : mesh.used)
+        {
+            remap[vertex] = uint32_t(positions.size() / 3);
+            const float* p = mesh.Get(mesh.position, vertex);
+            for (int j = 0; j < 3; j++)
+            {
+                positions.push_back(p[j]);
+                minimum[j] = std::min(minimum[j], p[j]);
+                maximum[j] = std::max(maximum[j], p[j]);
+            }
+            if (mesh.normal.stream >= 0)
+            {
+                const float* n = mesh.Get(mesh.normal, vertex);
+                float length = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+                for (int j = 0; j < 3; j++)
+                    normals.push_back(length > 0.0f ? n[j] / length : 0.0f);
+            }
+            if (mesh.texcoord.stream >= 0)
+            {
+                const float* t = mesh.Get(mesh.texcoord, vertex);
+                texcoords.push_back(t[0]);
+                texcoords.push_back(t[1]);
+            }
+        }
+        std::vector<uint32_t> triangles;
+        for (size_t i = 0; i + 2 < indices.size(); i += 3)
+        {
+            uint32_t corner[3];
+            bool valid = true;
+            for (int j = 0; j < 3; j++)
+            {
+                int64_t vertex = int64_t(indices[i + j]) + baseVertex;
+                valid &= vertex >= 0 && vertex < mesh.vertexCount;
+                corner[j] = valid ? remap[vertex] : 0;
+            }
+            if (valid)
+                triangles.insert(triangles.end(), corner, corner + 3);
+        }
+        mods::WriteGlb(directory / fmt::format("{:016x}.glb", id), positions, normals, texcoords, triangles);
+
+        std::string textures;
+        for (uint32_t i = 0; i < 16; i++)
+        {
+            uint32_t fetch[6];
+            LoadFetchConstant(g_guestDevice + DEVICE_FETCH_CONSTANTS + i * 24, fetch);
+            if ((fetch[0] & 3) == 2)
+                textures += fmt::format(" {}:{}x{}", i, (fetch[2] & 0x1FFF) + 1, ((fetch[2] >> 13) & 0x1FFF) + 1);
+        }
+        std::ofstream list(directory / "meshes.txt", std::ios::app);
+        list << fmt::format("{:016x}  {:6} vertices {:6} triangles  {}  size {:.3f} x {:.3f} x {:.3f}  textures{}\n", id, mesh.used.size(),
+            triangles.size() / 3, mesh.skinned ? "skinned" : "static ", maximum[0] - minimum[0], maximum[1] - minimum[1], maximum[2] - minimum[2],
+            textures.empty() ? " none" : textures);
+    }
+
+    // A model fitted to one game mesh: its positions, and the game vertex each of its
+    // vertices takes its other attributes from.
+    struct FittedModel
+    {
+        std::vector<float> positions;
+        std::vector<uint32_t> nearest;
+    };
+
+    struct ReplacementBuffers
+    {
+        std::vector<std::unique_ptr<RenderBuffer>> streams; // one per mesh stream; empty if it failed
+        std::vector<uint32_t> sizes;
+    };
+
+    ankerl::unordered_dense::map<uint64_t, FittedModel> g_fittedModels;            // by mesh ID
+    ankerl::unordered_dense::map<uint64_t, ReplacementBuffers> g_replacementBuffers; // by mesh ID and declaration
+    ankerl::unordered_dense::map<const mods::Model*, HostTexture> g_modTextures;
+
+    const FittedModel& FitModel(uint64_t id, const mods::MeshReplacement& replacement, const DecodedMesh& mesh)
+    {
+        FittedModel& fitted = g_fittedModels[id];
+        if (!fitted.nearest.empty())
+            return fitted;
+
+        const mods::Model& model = *replacement.model;
+        fitted.positions = model.positions;
+        uint32_t vertexCount = model.VertexCount();
+
+        if (replacement.fitBounds)
+        {
+            // Uniform scale so the model's extent matches the game mesh's along the game
+            // mesh's largest axis, then centre it on the game mesh.
+            float gameMin[3] = { INFINITY, INFINITY, INFINITY }, gameMax[3] = { -INFINITY, -INFINITY, -INFINITY };
+            float modelMin[3] = { INFINITY, INFINITY, INFINITY }, modelMax[3] = { -INFINITY, -INFINITY, -INFINITY };
+            for (uint32_t vertex : mesh.used)
+            {
+                const float* p = mesh.Get(mesh.position, vertex);
+                for (int j = 0; j < 3; j++)
+                    gameMin[j] = std::min(gameMin[j], p[j]), gameMax[j] = std::max(gameMax[j], p[j]);
+            }
+            for (uint32_t v = 0; v < vertexCount; v++)
+                for (int j = 0; j < 3; j++)
+                    modelMin[j] = std::min(modelMin[j], fitted.positions[v * 3 + j]), modelMax[j] = std::max(modelMax[j], fitted.positions[v * 3 + j]);
+            int axis = 0;
+            for (int j = 1; j < 3; j++)
+                if (gameMax[j] - gameMin[j] > gameMax[axis] - gameMin[axis])
+                    axis = j;
+            float modelExtent = modelMax[axis] - modelMin[axis];
+            float scale = modelExtent > 0.0f ? (gameMax[axis] - gameMin[axis]) / modelExtent : 1.0f;
+            for (uint32_t v = 0; v < vertexCount; v++)
+                for (int j = 0; j < 3; j++)
+                {
+                    float& p = fitted.positions[v * 3 + j];
+                    p = (p - (modelMin[j] + modelMax[j]) * 0.5f) * scale + (gameMin[j] + gameMax[j]) * 0.5f;
+                }
+        }
+
+        // Nearest game vertex of each model vertex. Done once per mesh, when it's first drawn.
+        std::vector<float> game;
+        game.reserve(mesh.used.size() * 3);
+        for (uint32_t vertex : mesh.used)
+        {
+            const float* p = mesh.Get(mesh.position, vertex);
+            game.insert(game.end(), p, p + 3);
+        }
+        fitted.nearest.resize(vertexCount);
+        for (uint32_t v = 0; v < vertexCount; v++)
+        {
+            const float* p = &fitted.positions[v * 3];
+            float best = INFINITY;
+            uint32_t bestIndex = 0;
+            for (size_t g = 0; g < mesh.used.size(); g++)
+            {
+                float dx = game[g * 3] - p[0], dy = game[g * 3 + 1] - p[1], dz = game[g * 3 + 2] - p[2];
+                float distance = dx * dx + dy * dy + dz * dz;
+                if (distance < best)
+                    best = distance, bestIndex = uint32_t(g);
+            }
+            fitted.nearest[v] = mesh.used[bestIndex];
+        }
+        LOGFN("Mods: {} replaces mesh {:016x} ({} game vertices, {} model vertices)", replacement.mod, id, mesh.used.size(), vertexCount);
+        return fitted;
+    }
+
+    // The replacement model's vertices in this declaration's layout; null if it can't be built.
+    const ReplacementBuffers* GetReplacementBuffers(uint64_t id, const mods::MeshReplacement& replacement, const VertexDeclaration& declaration,
+        const MeshStream* streams, uint32_t count, const std::vector<uint32_t>& indices, int32_t baseVertex)
+    {
+        struct { uint64_t id, declaration; } keyData{ id, declaration.hash };
+        uint64_t key = XXH3_64bits(&keyData, sizeof(keyData));
+        if (auto it = g_replacementBuffers.find(key); it != g_replacementBuffers.end())
+            return it->second.streams.empty() ? nullptr : &it->second;
+        ReplacementBuffers& buffers = g_replacementBuffers[key];
+
+        DecodedMesh mesh;
+        if (!DecodeMesh(declaration, streams, count, indices, baseVertex, mesh))
+        {
+            LOGFN_WARNING("Mods: mesh {:016x} has no positions to fit {}'s model to", id, replacement.mod);
+            return nullptr;
+        }
+        const FittedModel& fitted = FitModel(id, replacement, mesh);
+        const mods::Model& model = *replacement.model;
+        uint32_t vertexCount = model.VertexCount();
+
+        for (uint32_t k = 0; k < count; k++)
+        {
+            const StreamLayout& layout = declaration.streams[streams[k].layout];
+            uint32_t rowSize = layout.HostStride();
+            uint32_t size = vertexCount * rowSize;
+            auto buffer = g_device->createBuffer(RenderBufferDesc::VertexBuffer(size, RenderHeapType::UPLOAD, RenderBufferFlag::CONSTANT));
+            auto* destination = (uint8_t*)buffer->map();
+            for (uint32_t v = 0; v < vertexCount; v++)
+            {
+                uint8_t* row = destination + size_t(v) * rowSize;
+                memcpy(row, mesh.rows[k].data() + size_t(fitted.nearest[v]) * rowSize, rowSize);
+                for (uint32_t e = 0; e < layout.elements.size(); e++)
+                {
+                    const ElementDecode& element = layout.elements[e];
+                    float* out = (float*)(row + e * 16);
+                    if (element.usageIndex != 0)
+                        continue;
+                    if (element.usage == D3DDECLUSAGE_POSITION)
+                        memcpy(out, &fitted.positions[v * 3], 12);
+                    else if (element.usage == D3DDECLUSAGE_NORMAL && !model.normals.empty())
+                        memcpy(out, &model.normals[v * 3], 12);
+                    else if (element.usage == D3DDECLUSAGE_TEXCOORD && !model.texcoords.empty())
+                        memcpy(out, &model.texcoords[v * 2], 8);
+                }
+            }
+            buffer->unmap();
+            buffers.streams.push_back(std::move(buffer));
+            buffers.sizes.push_back(size);
+        }
+        return &buffers;
+    }
+
+    // The model's texture, uploaded on first use.
+    uint32_t GetModTexture(const mods::Model& model)
+    {
+        if (auto it = g_modTextures.find(&model); it != g_modTextures.end())
+            return it->second.descriptorIndex;
+        HostTexture& host = g_modTextures[&model];
+        host.descriptorIndex = NULL_TEXTURE_2D;
+        uint64_t size = model.texture.size();
+        auto [memory, offset] = Allocate(size, 512);
+        if (memory == nullptr)
+            return NULL_TEXTURE_2D;
+        memcpy(memory, model.texture.data(), size);
+
+        host.texture = g_device->createTexture(RenderTextureDesc::Texture2D(model.textureWidth, model.textureHeight, 1, RenderFormat::R8G8B8A8_UNORM));
+        RenderTextureViewDesc viewDesc = RenderTextureViewDesc::Texture2D(RenderFormat::R8G8B8A8_UNORM);
+        viewDesc.mipLevels = 1;
+        host.view = host.texture->createTextureView(viewDesc);
+        RenderTextureBarrier toCopy(host.texture.get(), RenderTextureLayout::COPY_DEST);
+        g_commandList->barriers(RenderBarrierStage::COPY, nullptr, 0, &toCopy, 1);
+        g_commandList->copyTextureRegion(RenderTextureCopyLocation::Subresource(host.texture.get()),
+            RenderTextureCopyLocation::PlacedFootprint(g_uploadBuffer.get(), RenderFormat::R8G8B8A8_UNORM, model.textureWidth, model.textureHeight, 1,
+                model.textureWidth, offset));
+        RenderTextureBarrier toRead(host.texture.get(), RenderTextureLayout::SHADER_READ);
+        g_commandList->barriers(RenderBarrierStage::GRAPHICS, nullptr, 0, &toRead, 1);
+        g_framebufferBound = false;
+        host.descriptorIndex = AllocateTextureDescriptor();
+        g_textureDescriptorSet->setTexture(host.descriptorIndex, host.texture.get(), RenderTextureLayout::SHADER_READ, host.view.get());
+        return host.descriptorIndex;
+    }
+
     struct DrawCall
     {
         uint32_t primitiveType = 0;
@@ -1979,6 +2314,9 @@ namespace
         uint32_t streamSlots[MAX_STREAMS];
         uint64_t streamAddresses[MAX_STREAMS]{};
         uint32_t streamCount = 0;
+        MeshStream meshStreams[MAX_STREAMS];
+        uint32_t meshStreamCount = 0;
+        uint64_t meshHash = 0;
         for (const auto& layout : declaration->streams)
         {
             if (call.userPointer)
@@ -2020,9 +2358,12 @@ namespace
                 else
                 {
                     uint32_t vertexCount = 0;
-                    const RenderBuffer* buffer = GetVertexBuffer(layout, address, size, stride, vertexCount);
+                    uint64_t contentHash = 0;
+                    const RenderBuffer* buffer = GetVertexBuffer(layout, address, size, stride, vertexCount, contentHash);
                     if (buffer == nullptr)
                         return Skip("empty vertex buffer");
+                    meshStreams[meshStreamCount++] = { streamCount, address, size, stride };
+                    meshHash = XXH3_64bits_withSeed(&contentHash, sizeof(contentHash), meshHash);
                     views[streamCount] = RenderVertexBufferView(buffer, uint32_t(uint64_t(vertexCount) * layout.HostStride()));
                     streamAddresses[streamCount] = buffer->getDeviceAddress();
                 }
@@ -2037,6 +2378,40 @@ namespace
             slots[streamCount] = RenderInputSlot(layout.stream, layout.HostStride());
             streamSlots[streamCount] = layout.stream;
             streamCount++;
+        }
+
+        // Mods: draw a replacement model instead of this mesh, or export it.
+        int32_t baseVertex = call.baseVertex;
+        const mods::MeshReplacement* replacement = nullptr;
+        bool exporting = ExportThisFrame();
+        if (meshStreamCount != 0 && call.indexed && topology == RenderPrimitiveTopology::TRIANGLE_LIST && (mods::Active() || exporting))
+        {
+            struct { uint64_t vertices, indices; int64_t baseVertex; } meshKey{ meshHash, XXH3_64bits(indices.data(), indices.size() * 4), call.baseVertex };
+            uint64_t meshId = XXH3_64bits(&meshKey, sizeof(meshKey));
+            if (exporting)
+                ExportMesh(meshId, *declaration, meshStreams, meshStreamCount, indices, call.baseVertex);
+            replacement = mods::FindMesh(meshId);
+            if (replacement != nullptr && replacement->hide)
+                return;
+            if (replacement != nullptr)
+            {
+                const ReplacementBuffers* buffers = GetReplacementBuffers(meshId, *replacement, *declaration, meshStreams, meshStreamCount, indices, call.baseVertex);
+                if (buffers == nullptr)
+                {
+                    replacement = nullptr;
+                }
+                else
+                {
+                    for (uint32_t k = 0; k < meshStreamCount; k++)
+                    {
+                        uint32_t s = meshStreams[k].layout;
+                        views[s] = RenderVertexBufferView(buffers->streams[k].get(), buffers->sizes[k]);
+                        streamAddresses[s] = buffers->streams[k]->getDeviceAddress();
+                    }
+                    indices = replacement->model->indices;
+                    baseVertex = 0;
+                }
+            }
         }
 
         // Constants: the guest device holds them big-endian. Textures are looked up (and
@@ -2063,6 +2438,8 @@ namespace
             shared.textureCubeIndices[i] = NULL_TEXTURE_CUBE;
             shared.samplerIndices[i] = (fetch[0] & 3) == 2 ? GetSamplerIndex(fetch) : SAMPLER_DEFAULT;
         }
+        if (replacement != nullptr && replacement->textureSlot >= 0 && replacement->textureSlot < 16 && !replacement->model->texture.empty())
+            shared.texture2DIndices[replacement->textureSlot] = GetModTexture(*replacement->model);
         uint32_t vsBooleans = Load32(g_guestDevice + DEVICE_BOOL_CONSTANTS);
         uint32_t psBooleans = Load32(g_guestDevice + DEVICE_BOOL_CONSTANTS + 16);
         shared.booleans = (vsBooleans & 0xFFFF) | (psBooleans << 16);
@@ -2171,7 +2548,7 @@ namespace
         g_commandList->setVertexBuffers(DUMMY_SLOT, &dummyView, 1, &dummySlot);
         RenderIndexBufferView indexView(g_uploadBuffer->at(indexOffset), uint32_t(indices.size() * 4), RenderFormat::R32_UINT);
         g_commandList->setIndexBuffer(&indexView);
-        g_commandList->drawIndexedInstanced(uint32_t(indices.size()), 1, 0, call.baseVertex, 0);
+        g_commandList->drawIndexedInstanced(uint32_t(indices.size()), 1, 0, baseVertex, 0);
         g_drawsThisFrame++;
     }
 
@@ -2347,6 +2724,7 @@ bool Video::Init(SDL_Window* window)
     }
 
     shader_store::Init();
+    mods::Init(ModsPath());
     LOGN("Video: Vulkan device and swap chain ready");
     return true;
 }

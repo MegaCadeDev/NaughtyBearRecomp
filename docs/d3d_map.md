@@ -133,6 +133,10 @@ At each draw `src/gpu/video.cpp`:
   every 16): the game loads each menu's and loading screen's images into memory earlier
   ones used, so a texture at the same address with the same format can be a new image.
 
+Meshes that a mod replaces ([modding.md](modding.md)) are identified by their vertex
+buffers' contents and the draw's indices; the draw then uses the mod's vertices (in the
+same layout, with bone weights taken from the nearest original vertex) and indices.
+
 Draws come from `DrawVertices`, `DrawIndexedVertices` and the `Begin(Indexed)Vertices` /
 `EndVertices` pair (which `DrawVerticesUP` and `DrawIndexedVerticesUP` use too); particle
 systems call the latter directly.

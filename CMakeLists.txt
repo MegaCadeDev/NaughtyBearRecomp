@@ -126,6 +126,9 @@ target_include_directories(NaughtyBear PRIVATE
     src
     src/gpu
     thirdparty/unordered_dense/include
+    thirdparty/cgltf
+    thirdparty/stb
+    tools/XenonRecomp/thirdparty/tomlplusplus
     tools/XenonRecomp/thirdparty/xxHash
     tools/XenosRecomp/thirdparty/zstd/lib
     ${HOST_SHADER_DIR})

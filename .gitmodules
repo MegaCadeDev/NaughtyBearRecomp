@@ -13,3 +13,9 @@
 [submodule "thirdparty/FFmpeg"]
 	path = thirdparty/FFmpeg
 	url = https://github.com/FFmpeg/FFmpeg.git
+[submodule "thirdparty/cgltf"]
+	path = thirdparty/cgltf
+	url = https://github.com/jkuhlmann/cgltf.git
+[submodule "thirdparty/stb"]
+	path = thirdparty/stb
+	url = https://github.com/nothings/stb.git

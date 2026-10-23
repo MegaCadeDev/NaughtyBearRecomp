@@ -26,7 +26,7 @@ Files written for this project: `src/kernel/virtual_memory.cpp`, `src/kernel/io/
 `src/kernel/xnet.cpp`, `src/kernel/crt_format.cpp`, `src/kernel/xex_modules.*`,
 `src/kernel/xam_user.cpp`, `src/kernel/xam_content.cpp`, `src/kernel/packages.*`,
 `src/apu/xma.*`, `src/user/*`, `src/import_stub.*`, `src/gpu/*` (renderer, headless GPU,
-shader store and translator glue, copy shaders).
+shader store and translator glue, copy shaders), `src/mods/*` (mod support).
 
 ## Third-party code
 
@@ -40,6 +40,9 @@ shader store and translator glue, copy shaders).
 - [zstd](https://github.com/facebook/zstd) (BSD) and [smol-v](https://github.com/aras-p/smol-v) (MIT), from XenosRecomp.
 - [plume](https://github.com/renderbag/plume) (MIT), submodule, the renderer abstraction Unleashed Recompiled uses.
 - [SDL2](https://www.libsdl.org/) (zlib), from the system.
+- [cgltf](https://github.com/jkuhlmann/cgltf) (MIT), submodule (v1.14), reads mods' glTF models.
+- [stb_image](https://github.com/nothings/stb) (MIT or public domain), submodule, decodes mods' textures.
+- [toml++](https://github.com/marzer/tomlplusplus) (MIT), from XenonRecomp, reads mods' `mod.toml`.
 - [glslang](https://github.com/KhronosGroup/glslang), from the system, compiles the renderer's copy shaders at build time.
 - Behaviour of several instructions and kernel functions, the Xenos register and fetch
   constant layouts, and the XMA decoder context layout and registers follow
