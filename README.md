@@ -8,7 +8,8 @@ the Xbox 360 kernel, graphics, audio and input.
 
 Roadmap:
 1. PC port (Linux first). **Playable.**
-2. PS5 homebrew port.
+2. PS5 homebrew port (title PPSA99862). **Builds; not yet tested on a console.** See
+   [ps5/README.md](ps5/README.md).
 
 No game data is included. You need your own legally dumped copy of the game.
 
@@ -151,6 +152,7 @@ with the runtime, and builds FFmpeg's XMA decoder from `thirdparty/FFmpeg`.
 | `patches/` | Patches to the submodules (XenonRecomp, XenosRecomp, plume, FFmpeg) |
 | `tools/` | Recompilation and shader scripts; `tools/nbanalyse` has the reverse-engineering tools |
 | `docs/` | How it works: [runtime](docs/runtime.md), [graphics](docs/d3d_map.md) |
+| `ps5/` | The PS5 version's build, packaging and deployment ([ps5/README.md](ps5/README.md)) |
 
 ## License
 

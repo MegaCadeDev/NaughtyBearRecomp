@@ -5,8 +5,8 @@
 #include <functional>
 #include <mutex>
 
-// Use pthreads directly on macOS to be able to increase default stack size.
-#ifdef __APPLE__
+// Use pthreads directly on macOS and the PS5 to be able to increase default stack size.
+#if defined(__APPLE__) || defined(__PROSPERO__)
 #define USE_PTHREAD 1
 #endif
 
@@ -69,6 +69,10 @@ struct GuestThreadHandle : KernelObject
 
     uint32_t Wait(uint32_t timeout) override;
 };
+
+// Starts a detached host thread with a stack big enough to run guest code (the game's
+// main thread, the audio thread).
+void StartHostThread(std::function<void()> function);
 
 // Thrown by ExTerminateThread to unwind the guest thread back to GuestThread::Start.
 struct GuestThreadExit

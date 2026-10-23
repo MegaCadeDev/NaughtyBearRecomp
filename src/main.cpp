@@ -13,15 +13,22 @@
 #include <kernel/xam.h>
 #include <kernel/xex_modules.h>
 #include <os/logger.h>
-#include <ui/launcher.h>
 #include <user/paths.h>
+#if !defined(__PROSPERO__)
+#include <ui/launcher.h>
+#include <SDL.h>
+#endif
 
 #include <file.h>
 #include <image.h>
 #include <xex.h>
 
 #include <csignal>
+#if defined(__PROSPERO__)
+#include <malloc_np.h>
+#else
 #include <malloc.h>
+#endif
 
 Memory g_memory;
 Heap g_userHeap;
@@ -38,8 +45,14 @@ std::filesystem::path& GetGamePath()
 }
 
 // Saves and the shader cache live next to the "game" folder (the working directory when
-// the game's path is given on the command line).
+// the game's path is given on the command line). On the PS5, everything is in one folder
+// of the console's storage.
+#if defined(__PROSPERO__)
+static const std::filesystem::path PS5_USER_PATH = "/data/NaughtyBearRecomp";
+static std::filesystem::path g_userPath = PS5_USER_PATH;
+#else
 static std::filesystem::path g_userPath = std::filesystem::current_path();
+#endif
 
 std::filesystem::path GetSavePath(bool checkForMods)
 {
@@ -124,11 +137,15 @@ static uint32_t LdrLoadModule(const std::filesystem::path& path)
 }
 
 // Finds Default.xex in a "game" folder (searched with its subfolders) next to the executable,
-// in the working directory, or in a parent of the executable's folder.
+// in the working directory, or in a parent of the executable's folder. On the PS5, in
+// /data/NaughtyBearRecomp/game, or a game folder in the title's own folder.
 static std::filesystem::path FindGameExecutable()
 {
     std::error_code ec;
     std::vector<std::filesystem::path> roots;
+#if defined(__PROSPERO__)
+    roots = { PS5_USER_PATH / "game", "/app0/game" };
+#else
     auto executableDir = std::filesystem::read_symlink("/proc/self/exe", ec).parent_path();
     if (!ec)
     {
@@ -140,6 +157,7 @@ static std::filesystem::path FindGameExecutable()
         }
     }
     roots.insert(roots.begin() + std::min<size_t>(1, roots.size()), std::filesystem::current_path(ec) / "game");
+#endif
 
     for (const auto& root : roots)
     {
@@ -169,6 +187,13 @@ static std::filesystem::path FindGameExecutable()
 
 int main(int argc, char** argv)
 {
+#if defined(__PROSPERO__)
+    // The log goes to a file the player can read over FTP.
+    std::error_code directoryError;
+    std::filesystem::create_directories(PS5_USER_PATH, directoryError);
+    freopen((PS5_USER_PATH / "log.txt").c_str(), "w", stdout);
+    dup2(fileno(stdout), fileno(stderr));
+#endif
     os::logger::Init();
     setvbuf(stdout, nullptr, _IONBF, 0); // keep log lines when the process dies
 
@@ -196,9 +221,14 @@ int main(int argc, char** argv)
         xexPath = FindGameExecutable();
         if (xexPath.empty())
         {
+#if defined(__PROSPERO__)
+            LOGN_ERROR("Could not find the game: put its files (with Default.xex) in /data/NaughtyBearRecomp/game.");
+#else
             LOGN_ERROR("Could not find the game: put its files (with Default.xex) in a \"game\" folder next to the executable.");
+#endif
             return EXIT_FAILURE;
         }
+#if !defined(__PROSPERO__)
         for (auto dir = xexPath.parent_path(); dir.has_relative_path(); dir = dir.parent_path())
         {
             if (dir.filename() == "game")
@@ -207,6 +237,7 @@ int main(int argc, char** argv)
                 break;
             }
         }
+#endif
     }
     g_gamePath = std::filesystem::absolute(xexPath).parent_path();
 
@@ -226,6 +257,27 @@ int main(int argc, char** argv)
         return EXIT_FAILURE;
     }
 
+#if defined(__PROSPERO__)
+    // No window or mods menu: the renderer presents straight to the display. The main
+    // thread applies rumble; the game runs on its own thread.
+    if (!Video::Init(nullptr))
+    {
+        LOGN_ERROR("Could not start the renderer.");
+        return EXIT_FAILURE;
+    }
+    hid::Init();
+    StartHostThread([entry]
+        {
+            GuestThread::Start({ entry, 0, 0 });
+            LOGN("Entry point returned.");
+            _exit(EXIT_SUCCESS);
+        });
+    while (true)
+    {
+        hid::Update();
+        std::this_thread::sleep_for(std::chrono::milliseconds(8));
+    }
+#else
     // SDL wants its window and events on the main thread, so the game gets its own.
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMECONTROLLER) != 0)
     {
@@ -280,4 +332,5 @@ int main(int argc, char** argv)
 
     // The game has no orderly shutdown path yet.
     _exit(EXIT_SUCCESS);
+#endif
 }

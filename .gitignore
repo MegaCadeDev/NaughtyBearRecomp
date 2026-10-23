@@ -24,3 +24,10 @@ save/
 
 # Mods are the players' own; none ship with the project (docs/modding.md)
 /mods/
+
+# PS5 build: downloaded dependencies and build output
+/ps5/.deps/
+/ps5/build/
+/ps5/dist/
+/ps5/pkg/
+/ps5/runtime/libc.prx

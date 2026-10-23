@@ -58,9 +58,6 @@ namespace mods
         std::string label;   // e.g. "Naughty Bear", "Ninja bears"
     };
 
-    // The characters of the game's data, in menu order.
-    const std::vector<Character>& Characters();
-
     // An installed mod, as the mods menu shows it.
     struct ModInfo
     {
@@ -72,6 +69,25 @@ namespace mods
         bool enabled = true;   // mesh mods: on or off
         std::string meshes;    // mesh mods: what they replace, for display
     };
+
+#if defined(__PROSPERO__)
+    // The PS5 version has no mod support: nothing is ever replaced.
+    inline const std::vector<Character>& Characters() { static const std::vector<Character> none; return none; }
+    inline std::vector<ModInfo> List(const std::filesystem::path&) { return {}; }
+    inline bool ShowMenu(const std::filesystem::path&) { return false; }
+    inline void SaveSettings(const std::filesystem::path&, const std::vector<ModInfo>&, bool) {}
+    inline void Init(const std::filesystem::path&) {}
+    inline bool Active() { return false; }
+    inline bool ReplacesCharacters() { return false; }
+    inline const MeshReplacement* FindMesh(uint64_t) { return nullptr; }
+    inline const MeshReplacement* FindCharacter(const std::string&) { return nullptr; }
+    inline float BrightLuminance(const std::vector<uint8_t>&) { return 1.0f; }
+    inline bool WriteGlb(const std::filesystem::path&, const std::vector<float>&, const std::vector<float>&, const std::vector<float>&,
+        const std::vector<uint32_t>&) { return false; }
+#else
+    // The characters of the game's data, in menu order.
+    const std::vector<Character>& Characters();
+
 
     // Installed mods, in load order, with the characters they replace (one mod per
     // character).
@@ -95,4 +111,5 @@ namespace mods
     // Writes a mesh as a binary glTF (.glb). Normals and texcoords may be empty.
     bool WriteGlb(const std::filesystem::path& path, const std::vector<float>& positions, const std::vector<float>& normals,
         const std::vector<float>& texcoords, const std::vector<uint32_t>& indices);
+#endif
 }

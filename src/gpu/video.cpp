@@ -18,7 +18,9 @@
 #include <kernel/memory.h>
 #include <mods/mods.h>
 #include <mods/origins.h>
+#if !defined(__PROSPERO__)
 #include <stb_image_write.h>
+#endif
 #include <os/logger.h>
 #include <user/paths.h>
 #include <plume_render_interface.h>
@@ -41,7 +43,11 @@ using namespace plume;
 
 namespace plume
 {
+#if defined(__PROSPERO__)
+    extern std::unique_ptr<RenderInterface> CreateVulkanInterface();
+#else
     extern std::unique_ptr<RenderInterface> CreateVulkanInterface(RenderWindow sdlWindow);
+#endif
 }
 
 void HeadlessGpuOnDeviceCreated(uint32_t device);
@@ -2285,9 +2291,11 @@ namespace
             textures += fmt::format(" {}:{}x{}", i, (fetch[2] & 0x1FFF) + 1, ((fetch[2] >> 13) & 0x1FFF) + 1);
             uint32_t width = 0, height = 0;
             std::vector<uint8_t> rgba;
+#if !defined(__PROSPERO__)
             if (ReadTextureRGBA(fetch, width, height, rgba))
                 stbi_write_png((directory / fmt::format("{:016x}_texture{}.png", id, i)).string().c_str(), int(width), int(height), 4, rgba.data(),
                     int(width * 4));
+#endif
         }
         std::ofstream list(directory / "meshes.txt", std::ios::app);
         list << fmt::format("{:016x}  {:6} vertices {:6} triangles  {}  size {:.3f} x {:.3f} x {:.3f}  textures{}\n", id, mesh.used.size(),
@@ -3187,7 +3195,14 @@ namespace
 
 bool Video::Init(SDL_Window* window)
 {
+#if defined(__PROSPERO__)
+    (void)window;
+    RenderWindow renderWindow{};
+    g_interface = CreateVulkanInterface();
+#else
+    RenderWindow renderWindow = window;
     g_interface = CreateVulkanInterface(window);
+#endif
     if (!g_interface)
     {
         LOGN_ERROR("Could not create the Vulkan interface.");
@@ -3206,7 +3221,7 @@ bool Video::Init(SDL_Window* window)
     g_fence = g_device->createCommandFence();
     g_acquireSemaphore = g_device->createCommandSemaphore();
     g_renderSemaphore = g_device->createCommandSemaphore();
-    g_swapChain = g_queue->createSwapChain(window, BUFFER_COUNT, BACKBUFFER_FORMAT, 1);
+    g_swapChain = g_queue->createSwapChain(renderWindow, BUFFER_COUNT, BACKBUFFER_FORMAT, 1);
     g_swapChain->setVsyncEnabled(true);
     g_swapChain->resize();
 

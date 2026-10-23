@@ -3,6 +3,8 @@
 // a frame and submits it through XAudioSubmitRenderDriverFrame. Frames are six channels
 // (5.1) of big-endian floats, channel-major; they are queued to SDL, downmixed to stereo
 // unless NB_SURROUND=1 and the device has six channels. NB_VOLUME=0..1 scales the output.
+#if !defined(__PROSPERO__) // (the PS5 has ps5_driver.cpp)
+
 #include <stdafx.h>
 #include <apu/audio.h>
 #include <cpu/guest_thread.h>
@@ -188,3 +190,5 @@ void XAudioSubmitFrame(void* samples)
         SDL_QueueAudio(g_audioDevice, audioFrames.data(), sizeof(audioFrames));
     }
 }
+
+#endif

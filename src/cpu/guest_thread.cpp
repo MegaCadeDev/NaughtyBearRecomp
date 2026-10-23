@@ -53,6 +53,10 @@ static size_t GetStackSize()
     {
         // 8 MiB is a typical default.
         constexpr auto defaultSize = 8 * 1024 * 1024;
+#if defined(__PROSPERO__)
+        // The PS5's default is far smaller than recompiled code needs, and it has no limit to ask.
+        stackSize = defaultSize;
+#else
         struct rlimit lim;
         const auto ret = getrlimit(RLIMIT_STACK, &lim);
         if (ret == 0 && lim.rlim_cur < defaultSize)
@@ -64,6 +68,7 @@ static size_t GetStackSize()
         {
             stackSize = defaultSize;
         }
+#endif
     }
     return stackSize;
 }
@@ -103,6 +108,32 @@ GuestThreadHandle::GuestThreadHandle(const GuestThreadParams& params)
 {
 }
 #endif
+
+void StartHostThread(std::function<void()> function)
+{
+#ifdef USE_PTHREAD
+    auto* start = new std::function<void()>(std::move(function));
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, GetStackSize());
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_t thread;
+    const auto ret = pthread_create(&thread, &attr, [](void* argument) -> void*
+        {
+            std::unique_ptr<std::function<void()>> function((std::function<void()>*)argument);
+            (*function)();
+            return nullptr;
+        }, start);
+    pthread_attr_destroy(&attr);
+    if (ret != 0)
+    {
+        fprintf(stderr, "pthread_create failed with error code 0x%X.\n", ret);
+        delete start;
+    }
+#else
+    std::thread(std::move(function)).detach();
+#endif
+}
 
 GuestThreadHandle::~GuestThreadHandle()
 {

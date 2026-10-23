@@ -1,6 +1,16 @@
 #include <stdafx.h>
 #include "shader_store.h"
+#if defined(__PROSPERO__)
+// No translator on the PS5 (it needs DXC): shaders come from the PC version's cache.
+namespace shader_translator
+{
+    inline size_t ContainerSize(const uint8_t*, size_t) { return 0; }
+    inline bool Translate(const uint8_t*, std::vector<uint8_t>&, uint32_t&, std::string& error) { error = "no translator"; return false; }
+    inline uint64_t Version() { return 0; }
+}
+#else
 #include <gpu/translator/shader_translator.h>
+#endif
 #include <kernel/memory.h>
 #include <kernel/packages.h>
 #include <os/logger.h>
@@ -39,6 +49,20 @@ namespace shader_store
         {
             return GetSavePath(false).parent_path() / "cache" / "shaders.bin";
         }
+
+#if defined(__PROSPERO__)
+        // The PS5 can't translate shaders (the translator needs DXC): it uses the cache the PC
+        // version built from the same game files, copied to /data/NaughtyBearRecomp/cache or
+        // packaged with the title.
+        std::filesystem::path FindCache()
+        {
+            std::error_code ec;
+            for (auto path : { CachePath(), std::filesystem::path("/app0/cache/shaders.bin") })
+                if (std::filesystem::exists(path, ec))
+                    return path;
+            return CachePath();
+        }
+#endif
 
         // Identifies the game data: names, sizes and times of the packages and the executable.
         uint64_t DataFingerprint()
@@ -141,11 +165,16 @@ namespace shader_store
 
     void Init()
     {
+#if defined(__PROSPERO__)
+        auto path = FindCache();
+#else
         auto path = CachePath();
+#endif
+        uint64_t translatorVersion = shader_translator::Version();
         std::ifstream file(path, std::ios::binary);
         CacheHeader header{};
         if (file.read((char*)&header, sizeof(header)) && header.magic == CACHE_MAGIC && header.format == CACHE_FORMAT
-            && header.translatorVersion == shader_translator::Version())
+            && (translatorVersion == 0 || header.translatorVersion == translatorVersion))
         {
             std::vector<uint8_t> compressed((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
             std::vector<uint8_t> body(header.uncompressedSize);
@@ -175,11 +204,19 @@ namespace shader_store
             LOGN("Shaders: the cache is from another translator version; it will be rebuilt");
         }
 
+#if defined(__PROSPERO__)
+        if (g_shaders.empty())
+            LOGFN_ERROR("Shaders: no shader cache at {}; build it with the PC version from the same game files (see ps5/README.md)", path.string());
+#else
         std::thread(SaverThread).detach();
+#endif
     }
 
     void Precache(const std::function<void(float)>& progress)
     {
+#if defined(__PROSPERO__)
+        return; // the cache comes from the PC version
+#endif
         uint64_t fingerprint = DataFingerprint();
         if (fingerprint == g_dataFingerprint)
             return;
@@ -266,6 +303,10 @@ namespace shader_store
     {
         if (container == nullptr || hash == 0 || Find(hash) != nullptr)
             return;
+#if defined(__PROSPERO__)
+        LOGFN_WARNING("Shaders: {:016x} isn't in the shader cache", hash);
+        return;
+#endif
         std::vector<uint8_t> spirv;
         uint32_t mask = 0;
         std::string error;

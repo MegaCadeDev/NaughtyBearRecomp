@@ -1,3 +1,5 @@
+#if !defined(__PROSPERO__) // the PS5 version has no the mods menu
+
 #include <stdafx.h>
 #include "launcher.h"
 #include <mods/mods.h>
@@ -194,3 +196,5 @@ namespace launcher
         return play;
     }
 }
+
+#endif

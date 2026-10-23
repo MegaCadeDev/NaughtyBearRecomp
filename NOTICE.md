@@ -52,3 +52,25 @@ shader store and translator glue, copy shaders), `src/mods/*` (mod support), `sr
   [Xenia](https://github.com/xenia-project/xenia) (BSD-3-Clause); no Xenia code is included.
 - XMA audio is decoded with [FFmpeg](https://ffmpeg.org) (LGPL-2.1+), built from source
   (`thirdparty/FFmpeg`, with `patches/FFmpeg`) and linked statically.
+
+## PS5 version
+
+- The PS5 platform layer follows [UnleashedRecomp-Prospero](https://github.com/Nazky/UnleashedRecomp-Prospero)
+  (GPL-3.0): the guest memory mapping (`src/kernel/memory.cpp`), the DualSense and
+  `sceAudioOut` details (`src/hid/hid_ps5.cpp`, `src/apu/driver/ps5_driver.cpp`), the display
+  surface in plume (`patches/plume/0002`) and the build and link steps (`ps5/tools/build.sh`).
+- From it, unchanged or nearly: `ps5/tools/` (`setup-native-dependencies.sh`,
+  `setup-pacbrew-dependencies.sh`, `build-radv.sh`, `mesa-python.sh`, `radv-link.sh`,
+  `deploy.sh`, `send-controller.sh`, `rebuild-libc.sh`, `controllers/`), `ps5/tooling/`,
+  `ps5/vendor/ps5/sdk/stubs/` and `ps5/runtime/`, which are from BlackBearReloaded's
+  ps5-native-app-boilerplate and by Mihawk-99 (GPL-3.0-or-later). `ps5/runtime/libc.prx` is
+  generated from that source by `ps5/tools/rebuild-libc.sh` (see `ps5/runtime/README.md`).
+- Downloaded and built by `ps5/tools/build.sh`, not included: the [PS5 payload SDK](https://github.com/ps5-payload-dev/sdk)
+  (GPL-3.0) as Mihawk-99's [PS5_PayloadSDK](https://github.com/mihawk-99/PS5_PayloadSDK) fork,
+  RADV from Mihawk-99's [PS5_Mesa](https://github.com/mihawk-99/PS5_Mesa) (Mesa, MIT), the
+  [PacBrew](https://github.com/ps5-payload-dev/pacbrew-repo) ports (zstd, BSD) and zlib (zlib
+  license), and FFmpeg's XMA decoder cross-compiled from `thirdparty/FFmpeg` (LGPL-2.1+).
+- `ps5/tooling/radv/clc-cache.tar.xz`: Mesa's internal OpenCL kernels for RADV, precompiled
+  to SPIR-V (Mesa, MIT), from UnleashedRecomp-Prospero, so building RADV doesn't need
+  LLVM's SPIR-V tools.
+- `ps5/sce_sys/icon0.png` is original art, drawn by `ps5/tools/make-icon.py`.

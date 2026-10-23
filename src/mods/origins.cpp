@@ -1,3 +1,5 @@
+#if !defined(__PROSPERO__) // the PS5 version has no mods
+
 #include <stdafx.h>
 #include "origins.h"
 #include <kernel/function.h>
@@ -134,3 +136,5 @@ PPC_FUNC(sub_830B5458)
     if (int32_t(ctx.r3.u32) >= 0 && destinationSize != 0)
         origins::NoteDecompress(source, destination, PPC_LOAD_U32(destinationSize));
 }
+
+#endif

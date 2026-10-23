@@ -1,3 +1,5 @@
+#if !defined(__PROSPERO__) // the PS5 version has no mods
+
 #include <stdafx.h>
 #include "mods.h"
 #include <os/logger.h>
@@ -1024,3 +1026,5 @@ namespace mods
         return bool(file);
     }
 }
+
+#endif
