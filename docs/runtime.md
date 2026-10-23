@@ -86,6 +86,12 @@ assets, then the payload, stored as is or as 1 MB chunks compressed with XMemCom
 the game's own recompiled `XMemDecompress` (see [d3d_map.md](d3d_map.md#shaders)). The game
 itself loads them through its own code. `*.cu` files list audio streams.
 
+For mods, `src/mods/origins.cpp` records which package each piece of memory came from: the
+buffers the game reads packages into (`NtReadFile`), what `XMemDecompress` unpacks from them
+(into a 1 MB staging buffer, a chunk at a time) and what the game's copy functions (`memcpy`
+at `0x8308F720` and `0x830B3988`, `XMemCpy` at `0x830B3900`) copy out of those into place.
+The renderer asks it where a mesh's vertex data came from to know whose mesh it is.
+
 ## Audio
 
 The game mixes audio with XAudio2, statically linked. Its render client is called every

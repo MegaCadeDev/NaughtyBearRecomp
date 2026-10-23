@@ -1,6 +1,7 @@
 #include <stdafx.h>
 #include "mods.h"
 #include <os/logger.h>
+#include <user/paths.h>
 #include <cgltf.h>
 #include <stb_image.h>
 #include <toml.hpp>
@@ -10,73 +11,92 @@
 
 // A mod is any of these in the mods folder:
 //
-//   - a model file (.glb or .gltf): it replaces Naughty Bear;
+//   - a model file (.glb or .gltf), replacing a character (Naughty Bear unless the mods menu
+//     says otherwise);
 //   - a folder with a model file and no mod.toml: the same;
-//   - a folder with a mod.toml:
+//   - a folder with a mod.toml for a model:
 //
 //       name = "My bear"
 //       author = "..."                 # shown in the mods menu
 //       license = "CC-BY-4.0"
-//
-//       [[mesh]]
-//       target = "naughty_bear"        # a named target (TARGETS below), or:
-//       replace = "0123456789abcdef"   # mesh ID(s) from NB_MOD_EXPORT; a string or a list
 //       model = "bear.glb"             # .glb or .gltf in the mod's folder
-//       texture_slot = 4               # the game texture slot the model's colours go in, or:
-//       textures = { 4 = "model", 1 = "flat_normal", 2 = "black" }
-//                                      # per slot: model, flat_normal, black, white or game
-//                                      # (a target sets them all)
-//       fit = "bounds"                 # fit the model onto the game mesh ("none" with replace)
-//       brightness = 1.0               # multiplies the model's colours (a target scales them
-//                                      # to suit its shader first)
+//       character = "ninjabear"        # who it replaces by default (see CHARACTERS)
+//       fit = "bounds"                 # or "none": the model is already lined up
+//       textures = { 4 = "model" }     # per texture slot: auto, model, flat_normal, black,
+//                                      # white or game (auto: chosen from the game's texture)
+//       brightness = 1.0               # multiplies the model's colours, after they're matched
+//                                      # to the game's
 //       scale = 1.0                    # applied to the model first, then
 //       rotate = [0, 0, 0]             # degrees about X, Y, Z, then
 //       offset = [0, 0, 0]             # a translation
+//
+//   - a folder with a mod.toml replacing meshes by ID (from NB_MOD_EXPORT), with the same
+//     model keys per mesh:
+//
+//       [[mesh]]
+//       replace = "0123456789abcdef"   # or a list
+//       model = "thing.glb"
 //
 //       [[mesh]]
 //       replace = "fedcba9876543210"
 //       hide = true                    # draw nothing for this mesh
 //
-// mods/settings.toml, written by the mods menu, lists the disabled mods. Folders whose name
-// starts with "_" or "." (such as _export) are not mods.
+// mods/settings.toml, written by the mods menu, says which mod replaces each character
+// (only one can) and which mods are off. Folders whose name starts with "_" or "." (such as
+// _export) are not mods.
 namespace mods
 {
     namespace
     {
-        // Game meshes known by name, so mods don't need mesh IDs.
-        struct Target
+        // The game's characters, by data package: every skinned mesh loaded from the
+        // package is the character (and costume pieces in it).
+        const Character CHARACTERS[] =
         {
-            const char* key;
-            const char* label;
-            std::vector<uint64_t> meshes;
-            // What the model puts in each texture slot; the rest keep the game's.
-            std::vector<std::pair<uint32_t, TextureSource>> textures;
-            // The game's shader for the mesh is made for its own colours; models' colours are
-            // scaled to a similar brightness.
-            float brightness;
+            { "naughtybear", "Naughty Bear" },
+            { "naughtyalien", "Naughty Bear (alien costume)" },
+            { "naughtyarmy", "Naughty Bear (army costume)" },
+            { "naughtycop", "Naughty Bear (cop costume)" },
+            { "naughtydanger", "Naughty Bear (danger costume)" },
+            { "naughtyninja", "Naughty Bear (ninja costume)" },
+            { "naughtypirate", "Naughty Bear (pirate costume)" },
+            { "naughtyrobot", "Naughty Bear (robot costume)" },
+            { "naughtyswat", "Naughty Bear (SWAT costume)" },
+            { "naughtyuni", "Naughty Bear (unibear costume)" },
+            { "naughtyvampire", "Naughty Bear (vampire costume)" },
+            { "naughtyzombie", "Naughty Bear (zombie costume)" },
+            { "normalbear", "Island bears" },
+            { "alienbear", "Alien bears" },
+            { "armybear", "Army bears" },
+            { "copbear", "Cop bears" },
+            { "dangerbear", "Danger bears" },
+            { "ninjabear", "Ninja bears" },
+            { "piratebear", "Pirate bears" },
+            { "robobear", "Robot bears" },
+            { "swatbear", "SWAT bears" },
+            { "unibear", "Unibear" },
+            { "vampirebear", "Vampire bears" },
+            { "zombiebear", "Zombie bears" },
+            { "impersonatoralien", "Impersonator (alien)" },
+            { "impersonatorarmy", "Impersonator (army)" },
+            { "impersonatorcop", "Impersonator (cop)" },
+            { "impersonatordanger", "Impersonator (danger)" },
+            { "impersonatorninja", "Impersonator (ninja)" },
+            { "impersonatorpirate", "Impersonator (pirate)" },
+            { "impersonatorrobot", "Impersonator (robot)" },
+            { "impersonatorswat", "Impersonator (SWAT)" },
+            { "impersonatorvampire", "Impersonator (vampire)" },
+            { "impersonatorzombie", "Impersonator (zombie)" },
+            { "mp_naughtybear", "Naughty Bear (multiplayer)" },
+            { "mp_redbear", "Red bear (multiplayer)" },
+            { "mp_bluebear", "Blue bear (multiplayer)" },
+            { "mp_greenbear", "Green bear (multiplayer)" },
+            { "mp_yellowbear", "Yellow bear (multiplayer)" },
+            { "mp_zombiemodecharacter", "Zombie (multiplayer)" },
         };
-
-        // Naughty Bear's textures: 0 the lighting ramp and 3 fur noise (neither follows the
-        // model's layout), 1 the normal map, 2 a glow mask (the eyes), 4 the colours, 5 effect
-        // masks, 6 a tinted copy of the colours (the fur's sheen). His fur colours are dark and
-        // the shader lights them brightly: his brightest are about 60% of white.
-        const Target TARGETS[] =
-        {
-            { "naughty_bear", "Naughty Bear", { 0xA62EF2EBBDE0F1ABull },
-                { { 1, TextureSource::FlatNormal }, { 2, TextureSource::Black }, { 4, TextureSource::Model }, { 5, TextureSource::Black },
-                    { 6, TextureSource::Model } }, 0.6f },
-        };
-        constexpr const char* DEFAULT_TARGET = "naughty_bear";
-
-        const Target* FindTarget(const std::string& key)
-        {
-            for (const Target& target : TARGETS)
-                if (key == target.key)
-                    return &target;
-            return nullptr;
-        }
+        constexpr const char* DEFAULT_CHARACTER = "naughtybear";
 
         ankerl::unordered_dense::map<uint64_t, MeshReplacement> g_meshes;
+        ankerl::unordered_dense::map<std::string, MeshReplacement> g_characters;
 
         // ---- Finding mods ----
 
@@ -90,9 +110,9 @@ namespace mods
         struct ModSource
         {
             std::string id;
-            std::filesystem::path directory;  // where its files are
-            std::filesystem::path manifest;   // mod.toml, or empty
-            std::filesystem::path model;      // the model, without a manifest
+            std::filesystem::path directory; // where its files are
+            std::filesystem::path manifest;  // mod.toml, or empty
+            std::filesystem::path model;     // the model, without a manifest
         };
 
         std::vector<ModSource> FindMods(const std::filesystem::path& directory)
@@ -102,7 +122,6 @@ namespace mods
             std::vector<std::filesystem::path> entries;
             for (const auto& entry : std::filesystem::directory_iterator(directory, ec))
                 entries.push_back(entry.path());
-            // Mods load in name order; a later mod wins when two replace the same mesh.
             std::sort(entries.begin(), entries.end());
             for (const auto& path : entries)
             {
@@ -137,12 +156,26 @@ namespace mods
             return sources;
         }
 
+        std::optional<toml::table> ReadManifest(const std::filesystem::path& path)
+        {
+            try
+            {
+                return toml::parse_file(path.string());
+            }
+            catch (const toml::parse_error& error)
+            {
+                LOGFN_ERROR("Mods: {}: {}", path.string(), error.description());
+                return std::nullopt;
+            }
+        }
+
         // ---- Settings ----
 
         struct Settings
         {
             bool showMenu = true;
-            std::set<std::string> disabled;
+            std::set<std::string> off;                    // mods turned off
+            std::map<std::string, std::string> characters; // character -> mod
         };
 
         Settings LoadSettings(const std::filesystem::path& directory)
@@ -151,18 +184,17 @@ namespace mods
             auto path = directory / "settings.toml";
             if (!std::filesystem::exists(path))
                 return settings;
-            try
+            if (auto table = ReadManifest(path))
             {
-                toml::table table = toml::parse_file(path.string());
-                settings.showMenu = table["show_menu"].value_or(true);
-                if (const toml::array* disabled = table["disabled"].as_array())
-                    for (const toml::node& id : *disabled)
+                settings.showMenu = (*table)["show_menu"].value_or(true);
+                if (const toml::array* off = (*table)["off"].as_array())
+                    for (const toml::node& id : *off)
                         if (auto text = id.value<std::string>())
-                            settings.disabled.insert(*text);
-            }
-            catch (const toml::parse_error& error)
-            {
-                LOGFN_ERROR("Mods: {}: {}", path.string(), error.description());
+                            settings.off.insert(*text);
+                if (const toml::table* characters = (*table)["characters"].as_table())
+                    for (const auto& [character, mod] : *characters)
+                        if (auto text = mod.value<std::string>())
+                            settings.characters[std::string(character.str())] = *text;
             }
             return settings;
         }
@@ -171,7 +203,6 @@ namespace mods
 
         struct Transform
         {
-            float brightness = 1.0f;
             float scale = 1.0f;
             float rotate[3] = {};
             float offset[3] = {};
@@ -192,12 +223,6 @@ namespace mods
 
         void TransformModel(Model& model, const Transform& transform)
         {
-            if (transform.brightness != 1.0f)
-            {
-                for (size_t i = 0; i < model.texture.size(); i++)
-                    if ((i & 3) != 3)
-                        model.texture[i] = uint8_t(std::clamp(float(model.texture[i]) * transform.brightness + 0.5f, 0.0f, 255.0f));
-            }
             float r[9];
             RotationMatrix(transform.rotate, r);
             for (size_t i = 0; i + 2 < model.positions.size(); i += 3)
@@ -349,6 +374,29 @@ namespace mods
                 u = (float(tileX[vertexTiles[v]]) + u * float(tile.width)) / float(width);
                 t = (float(tileY[vertexTiles[v]]) + t * float(tile.height)) / float(height);
             }
+        }
+
+        // The 95th percentile of an RGBA8 image's luminance (0-1), ignoring transparent pixels:
+        // how bright its bright parts are.
+        float ImageBrightness(const std::vector<uint8_t>& pixels)
+        {
+            uint32_t histogram[256] = {};
+            uint64_t count = 0;
+            for (size_t i = 0; i + 3 < pixels.size(); i += 4)
+            {
+                if (pixels[i + 3] == 0)
+                    continue;
+                histogram[(pixels[i] * 54 + pixels[i + 1] * 183 + pixels[i + 2] * 19) >> 8]++;
+                count++;
+            }
+            uint64_t seen = 0;
+            for (uint32_t level = 0; level < 256; level++)
+            {
+                seen += histogram[level];
+                if (seen >= count * 95 / 100 && count != 0)
+                    return float(level) / 255.0f;
+            }
+            return 1.0f;
         }
 
         // Every triangle primitive of every node, as the model looks at rest: skinned meshes
@@ -526,6 +574,7 @@ namespace mods
             if (!anyNormals)
                 model->normals.clear();
             BuildAtlas(*model, tiles, vertexTiles);
+            model->brightLuminance = ImageBrightness(model->texture);
             return model;
         }
 
@@ -580,21 +629,56 @@ namespace mods
 
         // ---- Loading ----
 
-        void ApplyTarget(const Target& target, MeshReplacement& replacement)
+        void ReadVector(const toml::node* node, float out[3])
         {
-            replacement.textures.fill(TextureSource::Game);
-            for (auto [slot, source] : target.textures)
-                replacement.textures[slot] = source;
+            if (const toml::array* array = node != nullptr ? node->as_array() : nullptr)
+            {
+                for (size_t i = 0; i < 3 && i < array->size(); i++)
+                    out[i] = (*array)[i].value<double>().value_or(0.0);
+            }
         }
 
-        void Replace(const std::vector<uint64_t>& ids, const MeshReplacement& replacement)
+        // The keys of a replacement, at the top of a model mod's mod.toml or in a [[mesh]].
+        struct ReplacementKeys
         {
-            for (uint64_t id : ids)
+            std::string model;
+            Transform transform;
+        };
+
+        ReplacementKeys ReadReplacement(const toml::table& table, const std::string& mod, bool fitByDefault, MeshReplacement& replacement)
+        {
+            ReplacementKeys keys;
+            replacement.mod = mod;
+            replacement.hide = table["hide"].value_or(false);
+            replacement.fitBounds = table["fit"].value_or(std::string(fitByDefault ? "bounds" : "none")) == "bounds";
+            replacement.textures.fill(TextureSource::Auto);
+            replacement.matchBrightness = true;
+            replacement.brightness = float(table["brightness"].value_or(1.0));
+            if (auto slot = table["texture_slot"].value<int64_t>(); slot && *slot >= 0 && *slot < 16)
+                replacement.textures[*slot] = TextureSource::Model;
+            if (const toml::table* textures = table["textures"].as_table())
             {
-                if (auto it = g_meshes.find(id); it != g_meshes.end())
-                    LOGFN_WARNING("Mods: {} and {} both replace mesh {:016x}; using {}", it->second.mod, replacement.mod, id, replacement.mod);
-                g_meshes[id] = replacement;
+                static const std::pair<const char*, TextureSource> SOURCES[] = { { "auto", TextureSource::Auto }, { "game", TextureSource::Game },
+                    { "model", TextureSource::Model }, { "flat_normal", TextureSource::FlatNormal }, { "black", TextureSource::Black },
+                    { "white", TextureSource::White } };
+                for (const auto& [key, value] : *textures)
+                {
+                    int slot = -1;
+                    std::from_chars(key.str().data(), key.str().data() + key.str().size(), slot);
+                    std::string source = value.value_or(std::string());
+                    auto it = std::find_if(std::begin(SOURCES), std::end(SOURCES), [&](const auto& s) { return source == s.first; });
+                    if (slot < 0 || slot >= 16 || it == std::end(SOURCES))
+                        LOGFN_ERROR("Mods: {}: textures: \"{}\" = \"{}\" isn't a slot (0-15) and one of auto, game, model, flat_normal, black, white",
+                            mod, key.str(), source);
+                    else
+                        replacement.textures[slot] = it->second;
+                }
             }
+            keys.model = table["model"].value_or(std::string());
+            keys.transform.scale = float(table["scale"].value_or(1.0));
+            ReadVector(table.get("rotate"), keys.transform.rotate);
+            ReadVector(table.get("offset"), keys.transform.offset);
+            return keys;
         }
 
         std::shared_ptr<const Model> LoadAndLog(const std::string& mod, const std::filesystem::path& path, const Transform& transform)
@@ -608,77 +692,144 @@ namespace mods
             return model;
         }
 
-        // A model on its own: it replaces the default target, fitted onto it.
-        void LoadModelMod(const ModSource& source)
+        bool IsModelMod(const ModSource& source, const toml::table* manifest)
         {
-            const Target* target = FindTarget(DEFAULT_TARGET);
+            return source.manifest.empty() || (manifest != nullptr && !(*manifest)["mesh"].as_array());
+        }
+
+        // Every installed mod, with the character each model mod replaces: the mods menu's
+        // choices, else the character the mod asks for if no other mod has it.
+        std::vector<ModInfo> Resolve(const std::filesystem::path& directory, std::vector<ModSource>& sources)
+        {
+            Settings settings = LoadSettings(directory);
+            sources = FindMods(directory);
+            std::vector<ModInfo> list(sources.size());
+            std::vector<std::string> wanted(sources.size());
+            const auto& characters = Characters();
+            auto known = [&](const std::string& package)
+                { return std::any_of(characters.begin(), characters.end(), [&](const Character& c) { return c.package == package; }); };
+
+            for (size_t i = 0; i < sources.size(); i++)
+            {
+                const ModSource& source = sources[i];
+                ModInfo& info = list[i];
+                info.id = source.id;
+                info.enabled = !settings.off.contains(source.id);
+                std::optional<toml::table> manifest;
+                if (!source.manifest.empty())
+                    manifest = ReadManifest(source.manifest);
+                info.isModel = IsModelMod(source, manifest ? &*manifest : nullptr);
+                if (manifest)
+                {
+                    info.name = (*manifest)["name"].value_or(source.id);
+                    info.credits = FormatCredits((*manifest)["author"].value_or(std::string()), (*manifest)["license"].value_or(std::string()));
+                    wanted[i] = (*manifest)["character"].value_or(std::string(DEFAULT_CHARACTER));
+                    if (!info.isModel)
+                    {
+                        size_t count = 0;
+                        for (const toml::node& mesh : *(*manifest)["mesh"].as_array())
+                            if (const toml::table* table = mesh.as_table())
+                                count += (*table)["replace"].is_array() ? (*table)["replace"].as_array()->size() : 1;
+                        info.meshes = fmt::format("{} mesh{}", count, count == 1 ? "" : "es");
+                    }
+                }
+                else if (!source.manifest.empty())
+                {
+                    info.name = source.id;
+                    info.isModel = false;
+                    info.enabled = false;
+                    info.meshes = "mod.toml has an error";
+                }
+                else
+                {
+                    auto credits = ReadModelCredits(source.model);
+                    info.name = credits.contains("title") ? credits["title"] : source.model.stem().string();
+                    info.credits = FormatCredits(credits["author"], credits["license"]);
+                    wanted[i] = DEFAULT_CHARACTER;
+                }
+            }
+
+            // The menu's choices first, then each remaining model mod gets the character it asks
+            // for if that's free.
+            std::set<std::string> taken;
+            for (const auto& [character, mod] : settings.characters)
+            {
+                for (size_t i = 0; i < list.size(); i++)
+                    if (list[i].id == mod && list[i].isModel && list[i].character.empty() && known(character) && !taken.contains(character))
+                    {
+                        list[i].character = character;
+                        taken.insert(character);
+                    }
+            }
+            for (size_t i = 0; i < list.size(); i++)
+            {
+                ModInfo& info = list[i];
+                bool chosen = std::any_of(settings.characters.begin(), settings.characters.end(), [&](const auto& c) { return c.second == info.id; });
+                if (!info.isModel || !info.character.empty() || chosen || settings.off.contains(info.id))
+                    continue;
+                if (known(wanted[i]) && !taken.contains(wanted[i]))
+                {
+                    info.character = wanted[i];
+                    taken.insert(wanted[i]);
+                }
+            }
+            return list;
+        }
+
+        void LoadModelMod(const ModSource& source, const ModInfo& info)
+        {
             MeshReplacement replacement;
-            replacement.mod = source.id;
-            replacement.fitBounds = true;
-            ApplyTarget(*target, replacement);
-            Transform transform;
-            transform.brightness = target->brightness;
-            replacement.model = LoadAndLog(source.id, source.model, transform);
+            ReplacementKeys keys;
+            std::filesystem::path model = source.model;
+            if (!source.manifest.empty())
+            {
+                auto manifest = ReadManifest(source.manifest);
+                if (!manifest)
+                    return;
+                keys = ReadReplacement(*manifest, info.name, true, replacement);
+                if (keys.model.empty())
+                {
+                    LOGFN_ERROR("Mods: {}: mod.toml needs model = \"file.glb\"", info.name);
+                    return;
+                }
+                model = source.directory / keys.model;
+            }
+            else
+            {
+                ReadReplacement(toml::table{}, info.name, true, replacement);
+            }
+            replacement.model = LoadAndLog(info.name, model, keys.transform);
             if (!replacement.model)
                 return;
-            Replace(target->meshes, replacement);
-            LOGFN("Mods: loaded \"{}\" (replaces {})", source.id, target->label);
+            g_characters[info.character] = std::move(replacement);
+            auto character = std::find_if(Characters().begin(), Characters().end(), [&](const Character& c) { return c.package == info.character; });
+            LOGFN("Mods: \"{}\" replaces {}", info.name, character != Characters().end() ? character->label : info.character);
         }
 
-        void ReadVector(const toml::node* node, float out[3])
+        void LoadMeshMod(const ModSource& source, const ModInfo& info)
         {
-            if (const toml::array* array = node != nullptr ? node->as_array() : nullptr)
-            {
-                for (size_t i = 0; i < 3 && i < array->size(); i++)
-                    out[i] = (*array)[i].value<double>().value_or(0.0);
-            }
-        }
-
-        void LoadManifestMod(const ModSource& source)
-        {
-            toml::table manifest;
-            try
-            {
-                manifest = toml::parse_file(source.manifest.string());
-            }
-            catch (const toml::parse_error& error)
-            {
-                LOGFN_ERROR("Mods: {}: {}", source.manifest.string(), error.description());
+            auto manifest = ReadManifest(source.manifest);
+            if (!manifest)
                 return;
-            }
-
-            std::string name = manifest["name"].value_or(source.id);
             uint32_t replaced = 0;
             std::map<std::string, std::shared_ptr<const Model>> models;
-            const toml::array* meshes = manifest["mesh"].as_array();
-            for (size_t m = 0; meshes != nullptr && m < meshes->size(); m++)
+            for (const toml::node& node : *(*manifest)["mesh"].as_array())
             {
-                const toml::table* mesh = (*meshes)[m].as_table();
+                const toml::table* mesh = node.as_table();
                 if (mesh == nullptr)
                     continue;
 
                 std::vector<uint64_t> ids;
-                const Target* target = nullptr;
-                if (auto key = (*mesh)["target"].value<std::string>())
-                {
-                    target = FindTarget(*key);
-                    if (target == nullptr)
+                auto readId = [&](const toml::node& id)
                     {
-                        LOGFN_ERROR("Mods: {}: unknown target \"{}\"", name, *key);
-                        continue;
-                    }
-                    ids = target->meshes;
-                }
-                auto readId = [&](const toml::node& node)
-                    {
-                        if (auto text = node.value<std::string>())
+                        if (auto text = id.value<std::string>())
                         {
-                            uint64_t id = 0;
-                            auto [end, error] = std::from_chars(text->data(), text->data() + text->size(), id, 16);
+                            uint64_t value = 0;
+                            auto [end, error] = std::from_chars(text->data(), text->data() + text->size(), value, 16);
                             if (error == std::errc() && end == text->data() + text->size())
-                                ids.push_back(id);
+                                ids.push_back(value);
                             else
-                                LOGFN_ERROR("Mods: {}: \"{}\" is not a mesh ID", name, *text);
+                                LOGFN_ERROR("Mods: {}: \"{}\" is not a mesh ID", info.name, *text);
                         }
                     };
                 if (const toml::array* list = (*mesh)["replace"].as_array())
@@ -688,113 +839,66 @@ namespace mods
                     readId(*id);
                 if (ids.empty())
                 {
-                    LOGFN_ERROR("Mods: {}: a [[mesh]] needs target = \"naughty_bear\" or replace = \"<mesh ID>\"", name);
+                    LOGFN_ERROR("Mods: {}: a [[mesh]] needs replace = \"<mesh ID>\"", info.name);
                     continue;
                 }
 
                 MeshReplacement replacement;
-                replacement.mod = name;
-                replacement.hide = (*mesh)["hide"].value_or(false);
-                replacement.fitBounds = (*mesh)["fit"].value_or(std::string(target != nullptr ? "bounds" : "none")) == "bounds";
-                if (target != nullptr)
-                    ApplyTarget(*target, replacement);
-                if (auto slot = (*mesh)["texture_slot"].value<int64_t>(); slot && *slot >= 0 && *slot < 16)
-                    replacement.textures[*slot] = TextureSource::Model;
-                if (const toml::table* textures = (*mesh)["textures"].as_table())
-                {
-                    for (const auto& [key, value] : *textures)
-                    {
-                        int slot = -1;
-                        std::from_chars(key.str().data(), key.str().data() + key.str().size(), slot);
-                        std::string source = value.value_or(std::string());
-                        static const std::pair<const char*, TextureSource> SOURCES[] = { { "game", TextureSource::Game }, { "model", TextureSource::Model },
-                            { "flat_normal", TextureSource::FlatNormal }, { "black", TextureSource::Black }, { "white", TextureSource::White } };
-                        auto it = std::find_if(std::begin(SOURCES), std::end(SOURCES), [&](const auto& s) { return source == s.first; });
-                        if (slot < 0 || slot >= 16 || it == std::end(SOURCES))
-                            LOGFN_ERROR("Mods: {}: textures: \"{}\" = \"{}\" isn't a slot (0-15) and one of game, model, flat_normal, black, white",
-                                name, key.str(), source);
-                        else
-                            replacement.textures[slot] = it->second;
-                    }
-                }
+                ReplacementKeys keys = ReadReplacement(*mesh, info.name, false, replacement);
                 if (!replacement.hide)
                 {
-                    std::string file = (*mesh)["model"].value_or(std::string());
-                    if (file.empty())
+                    if (keys.model.empty())
                     {
-                        LOGFN_ERROR("Mods: {}: a [[mesh]] needs model = \"file.glb\" or hide = true", name);
+                        LOGFN_ERROR("Mods: {}: a [[mesh]] needs model = \"file.glb\" or hide = true", info.name);
                         continue;
                     }
-                    Transform transform;
-                    transform.brightness = float((*mesh)["brightness"].value_or(1.0)) * (target != nullptr ? target->brightness : 1.0f);
-                    transform.scale = float((*mesh)["scale"].value_or(1.0));
-                    ReadVector(mesh->get("rotate"), transform.rotate);
-                    ReadVector(mesh->get("offset"), transform.offset);
-                    std::string key = fmt::format("{}|{}|{}|{}|{}|{}|{}|{}|{}", file, transform.brightness, transform.scale, transform.rotate[0], transform.rotate[1],
-                        transform.rotate[2], transform.offset[0], transform.offset[1], transform.offset[2]);
+                    const Transform& t = keys.transform;
+                    std::string key = fmt::format("{}|{}|{}|{}|{}|{}|{}|{}", keys.model, t.scale, t.rotate[0], t.rotate[1], t.rotate[2], t.offset[0],
+                        t.offset[1], t.offset[2]);
                     auto& model = models[key];
                     if (!model)
-                        model = LoadAndLog(name, source.directory / file, transform);
+                        model = LoadAndLog(info.name, source.directory / keys.model, t);
                     if (!model)
                         continue;
                     replacement.model = model;
                 }
-                Replace(ids, replacement);
+                for (uint64_t id : ids)
+                {
+                    if (auto it = g_meshes.find(id); it != g_meshes.end())
+                        LOGFN_WARNING("Mods: {} and {} both replace mesh {:016x}; using {}", it->second.mod, info.name, id, info.name);
+                    g_meshes[id] = replacement;
+                }
                 replaced += uint32_t(ids.size());
             }
-            LOGFN("Mods: loaded \"{}\" ({} meshes)", name, replaced);
+            LOGFN("Mods: loaded \"{}\" ({} meshes)", info.name, replaced);
         }
+    }
+
+    float BrightLuminance(const std::vector<uint8_t>& rgba)
+    {
+        return ImageBrightness(rgba);
+    }
+
+    const std::vector<Character>& Characters()
+    {
+        // The characters the game's data has (all of them if the game isn't found yet).
+        static const std::vector<Character> characters = []
+            {
+                std::vector<Character> present;
+                std::error_code ec;
+                for (const Character& character : CHARACTERS)
+                    if (GetGamePath().empty() || std::filesystem::exists(GetGamePath() / "lu" / (character.package + ".lu"), ec))
+                        present.push_back(character);
+                LOGFN("Mods: {} characters in the game's data", present.size());
+                return present;
+            }();
+        return characters;
     }
 
     std::vector<ModInfo> List(const std::filesystem::path& directory)
     {
-        Settings settings = LoadSettings(directory);
-        std::vector<ModInfo> list;
-        for (const ModSource& source : FindMods(directory))
-        {
-            ModInfo info;
-            info.id = source.id;
-            info.enabled = !settings.disabled.contains(source.id);
-            if (!source.manifest.empty())
-            {
-                try
-                {
-                    toml::table manifest = toml::parse_file(source.manifest.string());
-                    info.name = manifest["name"].value_or(source.id);
-                    info.credits = FormatCredits(manifest["author"].value_or(std::string()), manifest["license"].value_or(std::string()));
-                    std::set<std::string> targets;
-                    uint32_t meshCount = 0;
-                    if (const toml::array* meshes = manifest["mesh"].as_array())
-                        for (const toml::node& mesh : *meshes)
-                        {
-                            const toml::table* table = mesh.as_table();
-                            const Target* target = table != nullptr ? FindTarget((*table)["target"].value_or(std::string())) : nullptr;
-                            if (target != nullptr)
-                                targets.insert(target->label);
-                            else
-                                meshCount++;
-                        }
-                    for (const auto& target : targets)
-                        info.target += (info.target.empty() ? "" : ", ") + target;
-                    if (meshCount != 0)
-                        info.target += fmt::format("{}{} mesh{}", info.target.empty() ? "" : ", ", meshCount, meshCount == 1 ? "" : "es");
-                }
-                catch (const toml::parse_error&)
-                {
-                    info.name = source.id;
-                    info.target = "mod.toml has an error";
-                }
-            }
-            else
-            {
-                auto credits = ReadModelCredits(source.model);
-                info.name = credits.contains("title") ? credits["title"] : source.model.stem().string();
-                info.target = FindTarget(DEFAULT_TARGET)->label;
-                info.credits = FormatCredits(credits["author"], credits["license"]);
-            }
-            list.push_back(std::move(info));
-        }
-        return list;
+        std::vector<ModSource> sources;
+        return Resolve(directory, sources);
     }
 
     bool ShowMenu(const std::filesystem::path& directory)
@@ -804,44 +908,61 @@ namespace mods
 
     void SaveSettings(const std::filesystem::path& directory, const std::vector<ModInfo>& mods, bool showMenu)
     {
-        toml::array disabled;
+        toml::array off;
+        toml::table characters;
         for (const ModInfo& mod : mods)
-            if (!mod.enabled)
-                disabled.push_back(mod.id);
-        toml::table table{ { "show_menu", showMenu }, { "disabled", disabled } };
+        {
+            if (mod.isModel && !mod.character.empty())
+                characters.insert_or_assign(mod.character, mod.id);
+            else if (mod.isModel || !mod.enabled)
+                off.push_back(mod.id);
+        }
+        toml::table table{ { "show_menu", showMenu }, { "off", off }, { "characters", characters } };
         std::ofstream file(directory / "settings.toml");
         file << "# Written by the mods menu.\n" << table << "\n";
     }
 
     void Init(const std::filesystem::path& directory)
     {
+        // NB_NO_MODS=1 starts without them (for comparisons and troubleshooting).
+        if (getenv("NB_NO_MODS") != nullptr)
+            return;
         std::error_code ec;
         if (!std::filesystem::is_directory(directory, ec))
             return;
-        Settings settings = LoadSettings(directory);
-        for (const ModSource& source : FindMods(directory))
+        std::vector<ModSource> sources;
+        std::vector<ModInfo> list = Resolve(directory, sources);
+        for (size_t i = 0; i < list.size(); i++)
         {
-            if (settings.disabled.contains(source.id))
-            {
-                LOGFN("Mods: \"{}\" is disabled", source.id);
-                continue;
-            }
-            if (!source.manifest.empty())
-                LoadManifestMod(source);
+            if (list[i].isModel && !list[i].character.empty())
+                LoadModelMod(sources[i], list[i]);
+            else if (!list[i].isModel && list[i].enabled)
+                LoadMeshMod(sources[i], list[i]);
             else
-                LoadModelMod(source);
+                LOGFN("Mods: \"{}\" is off", list[i].name);
         }
     }
 
     bool Active()
     {
-        return !g_meshes.empty();
+        return !g_meshes.empty() || !g_characters.empty();
+    }
+
+    bool ReplacesCharacters()
+    {
+        return !g_characters.empty();
     }
 
     const MeshReplacement* FindMesh(uint64_t id)
     {
         auto it = g_meshes.find(id);
         return it != g_meshes.end() ? &it->second : nullptr;
+    }
+
+    const MeshReplacement* FindCharacter(const std::string& package)
+    {
+        auto it = g_characters.find(package);
+        return it != g_characters.end() ? &it->second : nullptr;
     }
 
     bool WriteGlb(const std::filesystem::path& path, const std::vector<float>& positions, const std::vector<float>& normals,

@@ -17,11 +17,13 @@
 #include <hid/hid.h>
 #include <kernel/memory.h>
 #include <mods/mods.h>
+#include <mods/origins.h>
 #include <stb_image_write.h>
 #include <os/logger.h>
 #include <user/paths.h>
 #include <plume_render_interface.h>
 #include <bit>
+#include <deque>
 
 #include <blit.vert.h>
 #include <blit.frag.h>
@@ -145,6 +147,12 @@ namespace
     constexpr uint64_t UPLOAD_BUFFER_SIZE = 128 * 1024 * 1024;
     // Host vertex buffers unused for this many frames are released.
     constexpr uint64_t VERTEX_BUFFER_LIFETIME = 600;
+    // Guest data the renderer keeps host copies of (vertex buffers, textures) is hashed again
+    // to see whether it changed: every CHECK_INTERVAL frames, each on a different frame so
+    // the work is spread out, and every frame for data seen changing, until it has stayed
+    // the same for STABLE_CHECKS checks.
+    constexpr uint64_t CHECK_INTERVAL = 8;
+    constexpr uint32_t STABLE_CHECKS = 60;
     // Vertex streams smaller than this are decoded per draw instead of cached.
     constexpr uint32_t SMALL_STREAM_SIZE = 16 * 1024;
 
@@ -302,6 +310,7 @@ namespace
         std::vector<RenderInputElement> inputElements;
         std::vector<StreamLayout> streams;
         uint64_t hash = 0;
+        bool skinned = false; // has blend indices: a character
     };
 
     std::unique_ptr<RenderInterface> g_interface;
@@ -358,6 +367,9 @@ namespace
     const uint64_t g_debugDrawsFrame = [] { const char* v = getenv("NB_DEBUG_DRAWS"); return v ? std::stoull(v) : 0ull; }();
     const bool g_noBlend = getenv("NB_NO_BLEND") != nullptr;
     uint64_t g_presentedFrames = 0;
+
+    // Time spent in Draw() this frame, for the statistics.
+    std::chrono::steady_clock::duration g_drawTime{};
 
     bool DebugThisFrame() { return g_debugDrawsFrame != 0 && g_presentedFrames + 1 == g_debugDrawsFrame; }
 
@@ -694,6 +706,7 @@ namespace
             }
             StreamLayout& layout = layouts[streamIndex[stream]];
             ElementClass elementClass = GetElementClass(usage);
+            declaration.skinned |= usage == D3DDECLUSAGE_BLENDINDICES;
             uint32_t hostOffset = layout.HostStride();
             layout.elements.push_back({ offset, type, elementClass, uint8_t(location), usage, usageIndex });
 
@@ -721,14 +734,39 @@ namespace
     }
 
     // Vertex buffers decoded for the host, kept across frames and refreshed when the guest
-    // data changes (checked once per frame).
+    // data changes (see CHECK_INTERVAL).
     struct HostVertexBuffer
     {
         std::unique_ptr<RenderBuffer> buffer;
         uint64_t size = 0;
         uint64_t contentHash = 0;
         uint64_t checkedFrame = ~0ull;
+        uint64_t usedFrame = 0;
+        bool changing = false;
+        uint32_t stableChecks = 0;
     };
+
+    // Whether host data kept for guest data should be checked against it this frame.
+    template<typename Entry>
+    bool CheckDue(const Entry& entry, uint64_t key)
+    {
+        return entry.changing || (g_frameIndex + key) % CHECK_INTERVAL == 0;
+    }
+
+    // Records the result of a check.
+    template<typename Entry>
+    void NoteCheck(Entry& entry, bool changed)
+    {
+        if (changed)
+        {
+            entry.changing = true;
+            entry.stableChecks = 0;
+        }
+        else if (entry.changing && ++entry.stableChecks >= STABLE_CHECKS)
+        {
+            entry.changing = false;
+        }
+    }
 
     ankerl::unordered_dense::map<uint64_t, HostVertexBuffer> g_vertexBuffers;
 
@@ -742,7 +780,8 @@ namespace
         struct { uint32_t address, size, stride, pad; uint64_t layout; } keyData{ address, sizeBytes, stride, 0, layout.hash };
         uint64_t key = XXH3_64bits(&keyData, sizeof(keyData));
         HostVertexBuffer& entry = g_vertexBuffers[key];
-        if (entry.checkedFrame == g_frameIndex && entry.buffer)
+        entry.usedFrame = g_frameIndex;
+        if (entry.buffer && (entry.checkedFrame == g_frameIndex || !CheckDue(entry, key)))
         {
             contentHash = entry.contentHash;
             return entry.buffer.get();
@@ -751,8 +790,12 @@ namespace
         const uint8_t* source = (const uint8_t*)g_memory.Translate(address);
         contentHash = XXH3_64bits(source, sizeBytes);
         entry.checkedFrame = g_frameIndex;
-        if (entry.buffer && entry.contentHash == contentHash)
-            return entry.buffer.get();
+        if (entry.buffer)
+        {
+            NoteCheck(entry, entry.contentHash != contentHash);
+            if (entry.contentHash == contentHash)
+                return entry.buffer.get();
+        }
 
         uint64_t hostSize = uint64_t(vertexCount) * layout.HostStride();
         if (!entry.buffer || entry.size < hostSize)
@@ -768,11 +811,13 @@ namespace
         return entry.buffer.get();
     }
 
+    void ReleaseUnusedIndexLists(); // with the index lists, below
+
     void ReleaseUnusedVertexBuffers()
     {
         for (auto it = g_vertexBuffers.begin(); it != g_vertexBuffers.end();)
         {
-            if (g_frameIndex - it->second.checkedFrame > VERTEX_BUFFER_LIFETIME)
+            if (g_frameIndex - it->second.usedFrame > VERTEX_BUFFER_LIFETIME)
                 it = g_vertexBuffers.erase(it);
             else
                 ++it;
@@ -966,11 +1011,9 @@ namespace
     }
 
     // Textures uploaded from guest memory, kept across frames. The game reuses memory for
-    // new textures (each menu and loading screen loads its own), so the contents are hashed
-    // and checked again when a texture is used in a new frame: every frame for small
-    // textures, every TEXTURE_CHECK_INTERVAL frames for large ones.
-    constexpr uint64_t TEXTURE_CHECK_INTERVAL = 16;
-    constexpr uint64_t SMALL_TEXTURE_SIZE = 1024 * 1024;
+    // new textures (each menu and loading screen loads its own), so the contents are checked
+    // again (see CHECK_INTERVAL); small ones every frame, which costs next to nothing.
+    constexpr uint64_t SMALL_TEXTURE_SIZE = 64 * 1024;
     constexpr uint64_t TEXTURE_LIFETIME = 600;
 
     struct HostTexture
@@ -981,6 +1024,8 @@ namespace
         uint64_t contentHash = 0;
         uint64_t checkedFrame = 0;
         uint64_t usedFrame = 0;
+        bool changing = false;
+        uint32_t stableChecks = 0;
     };
 
     ankerl::unordered_dense::map<uint64_t, HostTexture> g_textures;
@@ -1196,18 +1241,21 @@ namespace
     }
 
     // Copies a texture's top level out of guest memory: untiled, rows of blocks packed, in
-    // host byte order. destination holds blocksWide * blocksHigh blocks.
+    // host byte order. destination holds blocksWide * blocksHigh blocks. It's usually the
+    // upload buffer, which is write-combined: reading it back is very slow, so each block is
+    // swapped in a local copy and written once.
     void UntileTexture(const uint8_t* source, const XenosFormatInfo& info, uint32_t blocksWide, uint32_t blocksHigh, uint32_t pitchBlocks,
         bool tiled, uint32_t endian, uint8_t* destination)
     {
+        uint8_t block[16];
         for (uint32_t by = 0; by < blocksHigh; by++)
         {
             for (uint32_t bx = 0; bx < blocksWide; bx++)
             {
                 uint32_t sourceBlock = tiled ? TiledBlockIndex(bx, by, pitchBlocks, info.bytesPerBlock) : by * pitchBlocks + bx;
-                uint8_t* block = destination + (uint64_t(by) * blocksWide + bx) * info.bytesPerBlock;
                 memcpy(block, source + uint64_t(sourceBlock) * info.bytesPerBlock, info.bytesPerBlock);
                 SwapEndian(block, info.bytesPerBlock, endian);
+                memcpy(destination + (uint64_t(by) * blocksWide + bx) * info.bytesPerBlock, block, info.bytesPerBlock);
             }
         }
     }
@@ -1260,19 +1308,21 @@ namespace
         uint64_t sourceSize = tiled ? uint64_t((pitchBlocks + 31) & ~31u) * ((blocksHigh + 31) & ~31u) * info.bytesPerBlock
                                     : uint64_t(pitchBlocks) * blocksHigh * info.bytesPerBlock;
         const uint8_t* source = (const uint8_t*)g_memory.Translate(address);
+        bool changing = false;
 
         if (existing != g_textures.end())
         {
             HostTexture& entry = existing->second;
             entry.usedFrame = g_frameIndex;
-            uint64_t interval = sourceSize <= SMALL_TEXTURE_SIZE ? 1 : TEXTURE_CHECK_INTERVAL;
-            if (g_frameIndex - entry.checkedFrame < interval)
+            if (sourceSize > SMALL_TEXTURE_SIZE && !CheckDue(entry, key))
                 return entry.descriptorIndex;
             entry.checkedFrame = g_frameIndex;
             uint64_t contentHash = XXH3_64bits(source, sourceSize);
+            NoteCheck(entry, contentHash != entry.contentHash);
             if (contentHash == entry.contentHash)
                 return entry.descriptorIndex;
             // Rewritten: upload it again (draws earlier in this frame keep the old one).
+            changing = entry.changing;
             RetireTexture(std::move(entry));
             g_textures.erase(existing);
         }
@@ -1305,6 +1355,7 @@ namespace
         host.contentHash = XXH3_64bits(source, sourceSize);
         host.checkedFrame = g_frameIndex;
         host.usedFrame = g_frameIndex;
+        host.changing = changing;
         uint32_t descriptor = host.descriptorIndex;
         g_textures[key] = std::move(host);
         return descriptor;
@@ -1660,6 +1711,7 @@ namespace
         if ((g_frameIndex % 64) == 0)
         {
             ReleaseUnusedVertexBuffers();
+            ReleaseUnusedIndexLists();
             ReleaseUnusedTextures();
         }
 
@@ -1668,14 +1720,29 @@ namespace
 
         static uint64_t presented = 0;
         static auto lastReport = std::chrono::steady_clock::now();
+        static auto lastFrame = lastReport;
+        static std::chrono::steady_clock::duration longestFrame{}, longestDrawTime{};
+        static uint32_t slowFrames = 0;
         presented++;
         g_presentedFrames = presented;
         hid::OnFrame(presented);
         auto now = std::chrono::steady_clock::now();
+        // Frames that take noticeably longer than the game's frame period are hitches.
+        auto frameTime = now - lastFrame;
+        lastFrame = now;
+        longestFrame = std::max(longestFrame, frameTime);
+        longestDrawTime = std::max(longestDrawTime, g_drawTime);
+        if (frameTime > g_framePeriod * 3 / 2)
+            slowFrames++;
+        g_drawTime = {};
         if (now - lastReport >= std::chrono::seconds(2))
         {
-            LOGFN("Video: {} frames, last frame {} draws ({} skipped)", presented, g_drawsThisFrame, g_drawsSkippedThisFrame);
+            using ms = std::chrono::duration<double, std::milli>;
+            LOGFN("Video: {} frames, last frame {} draws ({} skipped); longest frame {:.1f} ms, {} slow, longest draw work {:.1f} ms", presented,
+                g_drawsThisFrame, g_drawsSkippedThisFrame, ms(longestFrame).count(), slowFrames, ms(longestDrawTime).count());
             lastReport = now;
+            longestFrame = longestDrawTime = {};
+            slowFrames = 0;
         }
     }
 
@@ -1887,6 +1954,67 @@ namespace
     }
 
     // ---- Draws ----
+
+    // Index lists of DrawIndexedVertices draws, converted for the host (strips, fans and
+    // quads to lists) and kept across frames with a GPU copy: converting every draw's indices
+    // every frame was the renderer's biggest cost. The guest's indices are checked once per
+    // frame, as vertex buffers are.
+    struct HostIndexList
+    {
+        std::vector<uint32_t> indices;
+        RenderPrimitiveTopology topology = RenderPrimitiveTopology::UNKNOWN;
+        bool built = false;
+        std::unique_ptr<RenderBuffer> buffer;
+        uint64_t bufferSize = 0;
+        uint64_t listHash = 0;    // of indices; part of mesh IDs
+        uint64_t contentHash = 0; // of the guest's indices
+        uint64_t checkedFrame = ~0ull;
+    };
+
+    ankerl::unordered_dense::map<uint64_t, HostIndexList> g_indexLists;
+
+    // Null if the primitive type isn't supported.
+    const HostIndexList* GetIndexList(uint32_t primitiveType, uint32_t data, uint32_t count, bool wide)
+    {
+        struct { uint32_t data, count, primitiveType, wide; } keyData{ data, count, primitiveType, wide };
+        HostIndexList& entry = g_indexLists[XXH3_64bits(&keyData, sizeof(keyData))];
+        if (entry.checkedFrame == g_frameIndex)
+            return entry.built ? &entry : nullptr;
+
+        uint64_t contentHash = XXH3_64bits(g_memory.Translate(data), uint64_t(count) * (wide ? 4 : 2));
+        bool fresh = entry.checkedFrame != ~0ull && contentHash == entry.contentHash;
+        entry.checkedFrame = g_frameIndex;
+        if (fresh)
+            return entry.built ? &entry : nullptr;
+
+        entry.contentHash = contentHash;
+        entry.built = BuildListIndices(primitiveType, count,
+            [&](uint32_t i) { return wide ? Load32(data + i * 4) : uint32_t(Load16(data + i * 2)); },
+            wide ? 0xFFFFFFFF : 0xFFFF, entry.indices, entry.topology);
+        if (!entry.built || entry.indices.empty())
+            return entry.built ? &entry : nullptr;
+        entry.listHash = XXH3_64bits(entry.indices.data(), entry.indices.size() * 4);
+        uint64_t size = entry.indices.size() * 4;
+        if (!entry.buffer || entry.bufferSize < size)
+        {
+            entry.buffer = g_device->createBuffer(RenderBufferDesc::IndexBuffer(size, RenderHeapType::UPLOAD));
+            entry.bufferSize = size;
+        }
+        memcpy(entry.buffer->map(), entry.indices.data(), size);
+        entry.buffer->unmap();
+        return &entry;
+    }
+
+    void ReleaseUnusedIndexLists()
+    {
+        for (auto it = g_indexLists.begin(); it != g_indexLists.end();)
+        {
+            if (g_frameIndex - it->second.checkedFrame > VERTEX_BUFFER_LIFETIME)
+                it = g_indexLists.erase(it);
+            else
+                ++it;
+        }
+    }
 
     // ---- Mods: replacement models (src/mods, docs/modding.md) ----
     //
@@ -2180,11 +2308,11 @@ namespace
     {
         std::vector<std::unique_ptr<RenderBuffer>> streams; // one per mesh stream; empty if it failed
         std::vector<uint32_t> sizes;
+        std::unique_ptr<RenderBuffer> indexBuffer;
     };
 
-    ankerl::unordered_dense::map<uint64_t, FittedModel> g_fittedModels;            // by mesh ID
     ankerl::unordered_dense::map<uint64_t, ReplacementBuffers> g_replacementBuffers; // by mesh ID and declaration
-    ankerl::unordered_dense::map<const mods::Model*, HostTexture> g_modTextures;
+    std::deque<HostTexture> g_modTextures;
 
     // Index of the nearest point (xyz triples) to p.
     uint32_t NearestPoint(const std::vector<float>& points, const float* p, float* distance = nullptr)
@@ -2257,12 +2385,26 @@ namespace
         return oneWay(a, b) + oneWay(b, a);
     }
 
-    const FittedModel& FitModel(uint64_t id, const mods::MeshReplacement& replacement, const DecodedMesh& mesh)
+    // A replacement for one game mesh, prepared on a worker thread the first time the mesh
+    // is drawn (the game mesh is drawn until it's ready): the model fitted to it, and what goes
+    // in each of its texture slots.
+    struct PreparedReplacement
     {
-        FittedModel& fitted = g_fittedModels[id];
-        if (!fitted.nearest.empty())
-            return fitted;
+        std::atomic<bool> ready = false;
+        bool failed = false;
+        FittedModel fitted;
+        std::array<mods::TextureSource, 16> textures{};
+        float brightness = 1.0f;          // applied to the model's colours
+        std::vector<uint8_t> texture;     // the model's colours at that brightness, until uploaded
+        uint32_t textureWidth = 0;
+        uint32_t textureHeight = 0;
+        uint32_t textureDescriptor = NULL_TEXTURE_2D;
+    };
 
+    ankerl::unordered_dense::map<uint64_t, std::unique_ptr<PreparedReplacement>> g_preparedReplacements; // by mesh ID
+
+    void FitModel(uint64_t id, const mods::MeshReplacement& replacement, const DecodedMesh& mesh, FittedModel& fitted)
+    {
         const mods::Model& model = *replacement.model;
         uint32_t vertexCount = model.VertexCount();
         std::vector<float> game;
@@ -2297,11 +2439,10 @@ namespace
                 LOGFN("Mods: {}: turned the model {} degrees to face the way the game mesh does", replacement.mod, bestTurns * 90);
         }
 
-        // Nearest game vertex of each model vertex. Done once per mesh, when it's first drawn.
+        // The nearest game vertex of each model vertex.
         fitted.nearest.resize(vertexCount);
         for (uint32_t v = 0; v < vertexCount; v++)
             fitted.nearest[v] = mesh.used[NearestPoint(game, &fitted.positions[v * 3])];
-        LOGFN("Mods: {} replaces mesh {:016x} ({} game vertices, {} model vertices)", replacement.mod, id, mesh.used.size(), vertexCount);
 
         // With NB_MOD_EXPORT, the model as fitted, to compare with the exported game mesh.
         if (g_exportFrame != 0)
@@ -2312,12 +2453,120 @@ namespace
             mods::WriteGlb(directory / fmt::format("{}_on_{:016x}.glb", replacement.mod, id), fitted.positions, fitted.normals, model.texcoords,
                 model.indices);
         }
-        return fitted;
+    }
+
+    // What each of the game mesh's texture slots gets, for slots the mod leaves to "auto",
+    // judged from the game's textures: normal maps (bluish on average) a flat normal map,
+    // masks (mostly black: glows, effects) black, the largest other textures (the colours)
+    // the model's colours, and the rest (lighting ramps, noise) stay the game's. Also how much
+    // to scale the model's colours by so its bright parts are as bright as the game's.
+    void ChooseTextures(const mods::MeshReplacement& replacement, const uint32_t fetches[16][6], PreparedReplacement& prepared)
+    {
+        uint64_t colourArea = 0;
+        float colourBrightness = 0.0f;
+        std::array<uint64_t, 16> candidateArea{};
+        for (uint32_t i = 0; i < 16; i++)
+        {
+            mods::TextureSource source = replacement.textures[i];
+            prepared.textures[i] = source == mods::TextureSource::Auto ? mods::TextureSource::Game : source;
+            if (source != mods::TextureSource::Auto || (fetches[i][0] & 3) != 2)
+                continue;
+            uint32_t width = 0, height = 0;
+            std::vector<uint8_t> rgba;
+            if (!ReadTextureRGBA(fetches[i], width, height, rgba))
+                continue;
+            double sum[3] = {};
+            uint64_t dark = 0, count = uint64_t(width) * height;
+            for (size_t p = 0; p < count; p++)
+            {
+                const uint8_t* texel = &rgba[p * 4];
+                for (int c = 0; c < 3; c++)
+                    sum[c] += texel[c];
+                if (texel[0] * 54 + texel[1] * 183 + texel[2] * 19 < 16 * 256)
+                    dark++;
+            }
+            float r = float(sum[0] / count), g = float(sum[1] / count), b = float(sum[2] / count);
+            if (b > 180.0f && std::fabs(r - 128.0f) < 48.0f && std::fabs(g - 128.0f) < 48.0f)
+            {
+                prepared.textures[i] = mods::TextureSource::FlatNormal;
+            }
+            else if (dark * 10 > count * 6)
+            {
+                prepared.textures[i] = mods::TextureSource::Black;
+            }
+            else
+            {
+                candidateArea[i] = count;
+                if (count > colourArea)
+                {
+                    colourArea = count;
+                    colourBrightness = mods::BrightLuminance(rgba);
+                }
+            }
+        }
+        for (uint32_t i = 0; i < 16; i++)
+            if (colourArea != 0 && candidateArea[i] == colourArea)
+                prepared.textures[i] = mods::TextureSource::Model;
+
+        const mods::Model& model = *replacement.model;
+        prepared.brightness = replacement.brightness;
+        if (replacement.matchBrightness && colourBrightness > 0.0f && model.brightLuminance > 0.0f)
+            prepared.brightness *= std::clamp(colourBrightness / model.brightLuminance, 0.2f, 1.0f);
+        prepared.texture = model.texture;
+        prepared.textureWidth = model.textureWidth;
+        prepared.textureHeight = model.textureHeight;
+        if (prepared.brightness != 1.0f)
+        {
+            for (size_t p = 0; p < prepared.texture.size(); p++)
+                if ((p & 3) != 3)
+                    prepared.texture[p] = uint8_t(std::min(float(prepared.texture[p]) * prepared.brightness + 0.5f, 255.0f));
+        }
+    }
+
+    // The replacement prepared for a game mesh; starts preparing it the first time. Null
+    // while it's being prepared, or if it can't be.
+    PreparedReplacement* GetPreparedReplacement(uint64_t id, const mods::MeshReplacement& replacement, const VertexDeclaration& declaration,
+        const MeshStream* streams, uint32_t count, const std::vector<uint32_t>& indices, int32_t baseVertex)
+    {
+        auto& slot = g_preparedReplacements[id];
+        if (slot)
+            return slot->ready && !slot->failed ? slot.get() : nullptr;
+        slot = std::make_unique<PreparedReplacement>();
+        PreparedReplacement* prepared = slot.get();
+
+        auto mesh = std::make_shared<DecodedMesh>();
+        if (!DecodeMesh(declaration, streams, count, indices, baseVertex, *mesh))
+        {
+            LOGFN_WARNING("Mods: mesh {:016x} has no positions to fit {}'s model to", id, replacement.mod);
+            prepared->failed = true;
+            prepared->ready = true;
+            return nullptr;
+        }
+        auto fetches = std::make_shared<std::array<std::array<uint32_t, 6>, 16>>();
+        for (uint32_t i = 0; i < 16; i++)
+            LoadFetchConstant(g_guestDevice + DEVICE_FETCH_CONSTANTS + i * 24, (*fetches)[i].data());
+
+        // Mod replacements are never removed, so the worker can keep pointers to them.
+        std::thread([id, &replacement, prepared, mesh, fetches]
+            {
+                auto start = std::chrono::steady_clock::now();
+                FitModel(id, replacement, *mesh, prepared->fitted);
+                ChooseTextures(replacement, (const uint32_t(*)[6])fetches->data(), *prepared);
+                std::string slots;
+                for (uint32_t i = 0; i < 16; i++)
+                    if (prepared->textures[i] != mods::TextureSource::Game)
+                        slots += fmt::format(" {}:{}", i, "?amfbw"[uint32_t(prepared->textures[i])]);
+                LOGFN("Mods: {} replaces mesh {:016x} ({} game vertices, {} model vertices; textures{}; brightness {:.2f}; {:.0f} ms)", replacement.mod,
+                    id, mesh->used.size(), replacement.model->VertexCount(), slots, prepared->brightness,
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+                prepared->ready = true;
+            }).detach();
+        return nullptr;
     }
 
     // The replacement model's vertices in this declaration's layout; null if it can't be built.
-    const ReplacementBuffers* GetReplacementBuffers(uint64_t id, const mods::MeshReplacement& replacement, const VertexDeclaration& declaration,
-        const MeshStream* streams, uint32_t count, const std::vector<uint32_t>& indices, int32_t baseVertex)
+    const ReplacementBuffers* GetReplacementBuffers(uint64_t id, const mods::MeshReplacement& replacement, const PreparedReplacement& prepared,
+        const VertexDeclaration& declaration, const MeshStream* streams, uint32_t count, const std::vector<uint32_t>& indices, int32_t baseVertex)
     {
         struct { uint64_t id, declaration; } keyData{ id, declaration.hash };
         uint64_t key = XXH3_64bits(&keyData, sizeof(keyData));
@@ -2327,11 +2576,8 @@ namespace
 
         DecodedMesh mesh;
         if (!DecodeMesh(declaration, streams, count, indices, baseVertex, mesh))
-        {
-            LOGFN_WARNING("Mods: mesh {:016x} has no positions to fit {}'s model to", id, replacement.mod);
             return nullptr;
-        }
-        const FittedModel& fitted = FitModel(id, replacement, mesh);
+        const FittedModel& fitted = prepared.fitted;
         const mods::Model& model = *replacement.model;
         uint32_t vertexCount = model.VertexCount();
 
@@ -2345,7 +2591,8 @@ namespace
             for (uint32_t v = 0; v < vertexCount; v++)
             {
                 uint8_t* row = destination + size_t(v) * rowSize;
-                memcpy(row, mesh.rows[k].data() + size_t(fitted.nearest[v]) * rowSize, rowSize);
+                uint32_t source = std::min(fitted.nearest[v], mesh.vertexCount - 1);
+                memcpy(row, mesh.rows[k].data() + size_t(source) * rowSize, rowSize);
                 for (uint32_t e = 0; e < layout.elements.size(); e++)
                 {
                     const ElementDecode& element = layout.elements[e];
@@ -2364,6 +2611,9 @@ namespace
             buffers.streams.push_back(std::move(buffer));
             buffers.sizes.push_back(size);
         }
+        buffers.indexBuffer = g_device->createBuffer(RenderBufferDesc::IndexBuffer(model.indices.size() * 4, RenderHeapType::UPLOAD));
+        memcpy(buffers.indexBuffer->map(), model.indices.data(), model.indices.size() * 4);
+        buffers.indexBuffer->unmap();
         return &buffers;
     }
 
@@ -2391,14 +2641,16 @@ namespace
         return host.descriptorIndex;
     }
 
-    // The model's texture, uploaded on first use.
-    uint32_t GetModTexture(const mods::Model& model)
+    // The model's colours (at the brightness chosen for the mesh), uploaded on first use.
+    uint32_t GetModTexture(PreparedReplacement& prepared)
     {
-        if (auto it = g_modTextures.find(&model); it != g_modTextures.end())
-            return it->second.descriptorIndex;
-        if (model.texture.empty())
-            return NULL_TEXTURE_2D;
-        return UploadRGBA(g_modTextures[&model], model.textureWidth, model.textureHeight, model.texture.data());
+        if (prepared.textureDescriptor == NULL_TEXTURE_2D && !prepared.texture.empty())
+        {
+            HostTexture& host = g_modTextures.emplace_back();
+            prepared.textureDescriptor = UploadRGBA(host, prepared.textureWidth, prepared.textureHeight, prepared.texture.data());
+            prepared.texture = {};
+        }
+        return prepared.textureDescriptor;
     }
 
     // A small texture of one colour (RGBA, red in the low byte).
@@ -2413,11 +2665,11 @@ namespace
         return UploadRGBA(g_solidTextures[rgba], 4, 4, (const uint8_t*)pixels);
     }
 
-    uint32_t GetReplacementTexture(mods::TextureSource source, const mods::Model& model)
+    uint32_t GetReplacementTexture(mods::TextureSource source, PreparedReplacement& prepared)
     {
         switch (source)
         {
-        case mods::TextureSource::Model: return GetModTexture(model);
+        case mods::TextureSource::Model: return GetModTexture(prepared);
         case mods::TextureSource::FlatNormal: return GetSolidTexture(0xFFFF8080);
         case mods::TextureSource::Black: return GetSolidTexture(0xFF000000);
         case mods::TextureSource::White: return GetSolidTexture(0xFFFFFFFF);
@@ -2444,9 +2696,19 @@ namespace
         uint32_t start = 0;            // first index, or first vertex
     };
 
+    void DrawImpl(const DrawCall& call);
+
     void Draw(const DrawCall& call)
     {
         std::lock_guard lock(g_videoMutex);
+        auto start = std::chrono::steady_clock::now();
+        DrawImpl(call);
+        g_drawTime += std::chrono::steady_clock::now() - start;
+    }
+
+
+    void DrawImpl(const DrawCall& call)
+    {
         if (g_guestDevice == 0)
             return;
         BeginFrame();
@@ -2492,8 +2754,11 @@ namespace
         if (onlyDeclaration != 0 && declaration->hash != onlyDeclaration && !call.userPointer)
             return;
 
-        // Indices, as a list topology.
-        static std::vector<uint32_t> indices;
+        // Indices, as a list topology: cached for index buffers, built here for the others.
+        static std::vector<uint32_t> builtIndices;
+        const std::vector<uint32_t>* indexList = &builtIndices;
+        const RenderBuffer* indexBuffer = nullptr; // a GPU copy of indexList, if there is one
+        uint64_t indexListHash = 0;
         RenderPrimitiveTopology topology = RenderPrimitiveTopology::UNKNOWN;
         bool built = false;
         if (call.userPointer)
@@ -2504,31 +2769,37 @@ namespace
                 bool wide = call.indexSize == 4;
                 built = BuildListIndices(call.primitiveType, call.count,
                     [&](uint32_t i) { return wide ? Load32(data + i * 4) : uint32_t(Load16(data + i * 2)); },
-                    wide ? 0xFFFFFFFF : 0xFFFF, indices, topology);
+                    wide ? 0xFFFFFFFF : 0xFFFF, builtIndices, topology);
             }
             else
             {
-                built = BuildListIndices(call.primitiveType, call.count, [](uint32_t i) { return i; }, ~0u, indices, topology);
+                built = BuildListIndices(call.primitiveType, call.count, [](uint32_t i) { return i; }, ~0u, builtIndices, topology);
             }
         }
         else if (call.indexed)
         {
-            uint32_t indexBuffer = Load32(g_guestDevice + DEVICE_INDEX_BUFFER);
-            if (indexBuffer == 0)
+            uint32_t guestIndexBuffer = Load32(g_guestDevice + DEVICE_INDEX_BUFFER);
+            if (guestIndexBuffer == 0)
                 return Skip("no index buffer");
-            bool wide = (Load32(indexBuffer) & 0x80000000) != 0;
-            uint32_t data = Load32(indexBuffer + BUFFER_ADDRESS) + call.start * (wide ? 4 : 2);
-            built = BuildListIndices(call.primitiveType, call.count,
-                [&](uint32_t i) { return wide ? Load32(data + i * 4) : uint32_t(Load16(data + i * 2)); },
-                wide ? 0xFFFFFFFF : 0xFFFF, indices, topology);
+            bool wide = (Load32(guestIndexBuffer) & 0x80000000) != 0;
+            uint32_t data = Load32(guestIndexBuffer + BUFFER_ADDRESS) + call.start * (wide ? 4 : 2);
+            if (const HostIndexList* list = GetIndexList(call.primitiveType, data, call.count, wide))
+            {
+                built = true;
+                indexList = &list->indices;
+                indexBuffer = list->buffer.get();
+                indexListHash = list->listHash;
+                topology = list->topology;
+            }
         }
         else
         {
             uint32_t first = call.start;
-            built = BuildListIndices(call.primitiveType, call.count, [&](uint32_t i) { return first + i; }, ~0u, indices, topology);
+            built = BuildListIndices(call.primitiveType, call.count, [&](uint32_t i) { return first + i; }, ~0u, builtIndices, topology);
         }
         if (!built)
             return Skip(fmt::format("primitive type {}", call.primitiveType));
+        const std::vector<uint32_t>& indices = *indexList;
         if (indices.empty())
             return;
 
@@ -2607,24 +2878,33 @@ namespace
         // Mods: draw a replacement model instead of this mesh, or export it.
         int32_t baseVertex = call.baseVertex;
         const mods::MeshReplacement* replacement = nullptr;
+        PreparedReplacement* prepared = nullptr;
         bool exporting = ExportThisFrame();
         if (meshStreamCount != 0 && call.indexed && topology == RenderPrimitiveTopology::TRIANGLE_LIST && (mods::Active() || exporting))
         {
-            struct { uint64_t vertices, indices; int64_t baseVertex; } meshKey{ meshHash, XXH3_64bits(indices.data(), indices.size() * 4), call.baseVertex };
+            uint64_t indicesHash = indexListHash != 0 ? indexListHash : XXH3_64bits(indices.data(), indices.size() * 4);
+            struct { uint64_t vertices, indices; int64_t baseVertex; } meshKey{ meshHash, indicesHash, call.baseVertex };
             uint64_t meshId = XXH3_64bits(&meshKey, sizeof(meshKey));
             if (DebugThisFrame())
-                LOGF_IMPL(Utility, "draw", "  mesh {:016x} (vertices {:016x}){}", meshId, meshHash, mods::FindMesh(meshId) != nullptr ? " replaced" : "");
+                LOGF_IMPL(Utility, "draw", "  mesh {:016x} (vertices {:016x} @{:08X} from \"{}\"){}", meshId, meshHash, meshStreams[0].address,
+                    origins::Find(meshStreams[0].address), mods::FindMesh(meshId) != nullptr ? " replaced" : "");
             if (exporting)
                 ExportMesh(meshId, *declaration, meshStreams, meshStreamCount, indices, call.baseVertex);
+            // A mesh named by a mod, else a character's (a skinned mesh from its data package).
             replacement = mods::FindMesh(meshId);
+            if (replacement == nullptr && declaration->skinned && mods::ReplacesCharacters())
+                replacement = mods::FindCharacter(origins::Find(meshStreams[0].address));
             if (replacement != nullptr && replacement->hide)
                 return;
             if (replacement != nullptr)
             {
-                const ReplacementBuffers* buffers = GetReplacementBuffers(meshId, *replacement, *declaration, meshStreams, meshStreamCount, indices, call.baseVertex);
+                prepared = GetPreparedReplacement(meshId, *replacement, *declaration, meshStreams, meshStreamCount, indices, call.baseVertex);
+                const ReplacementBuffers* buffers = prepared != nullptr
+                    ? GetReplacementBuffers(meshId, *replacement, *prepared, *declaration, meshStreams, meshStreamCount, indices, call.baseVertex)
+                    : nullptr;
                 if (buffers == nullptr)
                 {
-                    replacement = nullptr;
+                    replacement = nullptr; // the game's mesh until the replacement is ready
                 }
                 else
                 {
@@ -2634,7 +2914,8 @@ namespace
                         views[s] = RenderVertexBufferView(buffers->streams[k].get(), buffers->sizes[k]);
                         streamAddresses[s] = buffers->streams[k]->getDeviceAddress();
                     }
-                    indices = replacement->model->indices;
+                    indexList = &replacement->model->indices;
+                    indexBuffer = buffers->indexBuffer.get();
                     baseVertex = 0;
                 }
             }
@@ -2667,8 +2948,8 @@ namespace
         if (replacement != nullptr)
         {
             for (uint32_t i = 0; i < 16; i++)
-                if (replacement->textures[i] != mods::TextureSource::Game)
-                    shared.texture2DIndices[i] = GetReplacementTexture(replacement->textures[i], *replacement->model);
+                if (prepared->textures[i] != mods::TextureSource::Game)
+                    shared.texture2DIndices[i] = GetReplacementTexture(prepared->textures[i], *prepared);
         }
         uint32_t vsBooleans = Load32(g_guestDevice + DEVICE_BOOL_CONSTANTS);
         uint32_t psBooleans = Load32(g_guestDevice + DEVICE_BOOL_CONSTANTS + 16);
@@ -2752,11 +3033,19 @@ namespace
 
         PushConstants pushConstants{ g_uploadAddress + vsOffset, g_uploadAddress + psOffset, g_uploadAddress + sharedOffset };
 
-        auto [indexMemory, indexOffset] = Allocate(indices.size() * 4);
+        uint32_t indexCount = uint32_t(indexList->size());
+        RenderIndexBufferView indexView(indexBuffer, indexCount * 4, RenderFormat::R32_UINT);
+        if (indexBuffer == nullptr)
+        {
+            auto [indexMemory, indexOffset] = Allocate(indexCount * 4);
+            if (indexMemory == nullptr)
+                return Skip("upload buffer full");
+            memcpy(indexMemory, indexList->data(), indexCount * 4);
+            indexView = RenderIndexBufferView(g_uploadBuffer->at(indexOffset), indexCount * 4, RenderFormat::R32_UINT);
+        }
         auto [dummyMemory, dummyOffset] = Allocate(64);
-        if (indexMemory == nullptr || dummyMemory == nullptr)
+        if (dummyMemory == nullptr)
             return Skip("upload buffer full");
-        memcpy(indexMemory, indices.data(), indices.size() * 4);
         memset(dummyMemory, 0, 64);
 
         if (DebugThisFrame())
@@ -2776,9 +3065,8 @@ namespace
         RenderVertexBufferView dummyView(g_uploadBuffer->at(dummyOffset), 64);
         RenderInputSlot dummySlot(DUMMY_SLOT, 0);
         g_commandList->setVertexBuffers(DUMMY_SLOT, &dummyView, 1, &dummySlot);
-        RenderIndexBufferView indexView(g_uploadBuffer->at(indexOffset), uint32_t(indices.size() * 4), RenderFormat::R32_UINT);
         g_commandList->setIndexBuffer(&indexView);
-        g_commandList->drawIndexedInstanced(uint32_t(indices.size()), 1, 0, baseVertex, 0);
+        g_commandList->drawIndexedInstanced(indexCount, 1, 0, baseVertex, 0);
         g_drawsThisFrame++;
     }
 

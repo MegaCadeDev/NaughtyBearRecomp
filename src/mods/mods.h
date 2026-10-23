@@ -1,5 +1,5 @@
-// Mod support: replacement models for the game's meshes. No mods ship with the project;
-// players put their own in the mods folder (see docs/modding.md).
+// Mod support: replacement models for the game's characters and meshes. No mods ship with
+// the project; players put their own in the mods folder (see docs/modding.md).
 #pragma once
 
 #include <array>
@@ -23,6 +23,7 @@ namespace mods
         uint32_t textureWidth = 0;
         uint32_t textureHeight = 0;
         std::vector<uint8_t> texture;
+        float brightLuminance = 1.0f; // the 95th percentile of the texture's luminance, 0-1
 
         uint32_t VertexCount() const { return uint32_t(positions.size() / 3); }
     };
@@ -30,6 +31,7 @@ namespace mods
     // What one of a replaced mesh's texture slots holds.
     enum class TextureSource : uint8_t
     {
+        Auto,       // chosen from what the game's texture looks like
         Game,       // the game's texture
         Model,      // the model's colours
         FlatNormal, // a normal map with no bumps
@@ -40,24 +42,39 @@ namespace mods
     // What to draw instead of one of the game's meshes.
     struct MeshReplacement
     {
-        std::string mod;          // the mod's name, for messages
-        bool hide = false;        // draw nothing
-        bool fitBounds = false;   // turn, scale and move the model onto the game mesh
+        std::string mod;           // the mod's name, for messages
+        bool hide = false;         // draw nothing
+        bool fitBounds = false;    // turn, scale and move the model onto the game mesh
         std::array<TextureSource, 16> textures{};
+        bool matchBrightness = false; // scale the model's colours to the game mesh's
+        float brightness = 1.0f;      // then multiply them by this
         std::shared_ptr<const Model> model;
     };
+
+    // A character a mod can replace: every skinned mesh loaded from its data package.
+    struct Character
+    {
+        std::string package; // e.g. "naughtybear", "ninjabear"
+        std::string label;   // e.g. "Naughty Bear", "Ninja bears"
+    };
+
+    // The characters of the game's data, in menu order.
+    const std::vector<Character>& Characters();
 
     // An installed mod, as the mods menu shows it.
     struct ModInfo
     {
-        std::string id;      // its folder or file name in the mods folder
+        std::string id;        // its folder or file name in the mods folder
         std::string name;
-        std::string target;  // what it replaces
-        std::string credits; // author and license, from mod.toml or the model file
-        bool enabled = true;
+        std::string credits;   // author and license, from mod.toml or the model file
+        bool isModel = true;   // a model that replaces a character; otherwise mod.toml meshes
+        std::string character; // model mods: the character it replaces, empty if off
+        bool enabled = true;   // mesh mods: on or off
+        std::string meshes;    // mesh mods: what they replace, for display
     };
 
-    // Installed mods, in load order, and whether each is enabled.
+    // Installed mods, in load order, with the characters they replace (one mod per
+    // character).
     std::vector<ModInfo> List(const std::filesystem::path& directory);
 
     // The mods menu's settings, kept in mods/settings.toml.
@@ -68,7 +85,12 @@ namespace mods
     void Init(const std::filesystem::path& directory);
 
     bool Active();
+    bool ReplacesCharacters();
     const MeshReplacement* FindMesh(uint64_t id);
+    const MeshReplacement* FindCharacter(const std::string& package);
+
+    // The 95th percentile of an RGBA8 image's luminance (0-1): how bright its bright parts are.
+    float BrightLuminance(const std::vector<uint8_t>& rgba);
 
     // Writes a mesh as a binary glTF (.glb). Normals and texcoords may be empty.
     bool WriteGlb(const std::filesystem::path& path, const std::vector<float>& positions, const std::vector<float>& normals,

@@ -127,14 +127,18 @@ At each draw `src/gpu/video.cpp`:
   location's stream is also passed to the shaders by address, for vertex fetches indexed
   by a computed register (skinning palettes, particles);
 - converts strips, fans and quads to triangle lists on the CPU (honouring strip restarts);
+  index buffers' lists are kept, with a GPU copy, and rebuilt only when the guest's indices
+  change;
 - reads textures from their fetch constants (untiling and byte-swapping them), and their
   samplers' clamp and filter modes. Uploaded textures are kept, and their guest memory is
-  hashed again when they're used in a later frame (small ones every frame, large ones
-  every 16): the game loads each menu's and loading screen's images into memory earlier
-  ones used, so a texture at the same address with the same format can be a new image.
+  hashed again to catch new images (the game loads each menu's and loading screen's images
+  into memory earlier ones used): small textures every frame, others every 8 frames, each
+  on a different frame so the work is spread out, and every frame for a while once one has
+  changed. Vertex buffers are checked the same way.
 
 Meshes that a mod replaces ([modding.md](modding.md)) are identified by their vertex
-buffers' contents and the draw's indices; the draw then uses the mod's vertices (in the
+buffers' contents and the draw's indices, or as a character's: skinned meshes whose vertex
+data came from the character's data package (see [runtime.md](runtime.md#data-packages)); the draw then uses the mod's vertices (in the
 same layout, with bone weights taken from the nearest original vertex) and indices.
 
 Draws come from `DrawVertices`, `DrawIndexedVertices` and the `Begin(Indexed)Vertices` /

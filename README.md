@@ -92,11 +92,12 @@ Set as environment variables:
 
 ### Mods
 
-Models in a `mods/` folder (next to the `game` folder) replace the game's: drop in a `.glb`
-file and it replaces Naughty Bear. When mods are installed, a menu before the game starts
-lets you turn each on or off (`--mods-menu` shows it if it was turned off, `--no-mods-menu`
-skips it). The project includes and distributes no mods; making them, and having the rights
-to what's in them, is up to their authors. See [docs/modding.md](docs/modding.md).
+Models in a `mods/` folder (next to the `game` folder) replace the game's characters: drop
+in a `.glb` file and choose, in the menu shown before the game starts, which character it
+replaces (Naughty Bear, his costumes, the island bears, ...; one mod per character).
+`--mods-menu` shows the menu if it was turned off, `--no-mods-menu` skips it, and
+`NB_NO_MODS=1` starts without mods. The project includes and distributes no mods; making
+them, and having the rights to what's in them, is up to their authors. See [docs/modding.md](docs/modding.md).
 
 Debugging:
 

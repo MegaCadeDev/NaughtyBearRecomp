@@ -12,6 +12,7 @@
 #include <kernel/memory.h>
 #include <kernel/xam.h>
 #include <kernel/xdm.h>
+#include <mods/origins.h>
 #include <os/logger.h>
 #include <user/paths.h>
 
@@ -487,6 +488,7 @@ uint32_t NtReadFile(uint32_t fileHandle, uint32_t event, uint32_t apcRoutine, ui
     if (read < 0)
         read = 0;
     handle->position = offset + read;
+    origins::NoteRead(handle->path, g_memory.MapVirtual(buffer), uint32_t(read));
 
     uint32_t status = (read == 0 && length != 0) ? X_STATUS_END_OF_FILE : X_STATUS_SUCCESS;
     CompleteRequest(handle, ioStatusBlock, status, uint32_t(read), event, apcContext);
@@ -511,6 +513,7 @@ uint32_t NtReadFileScatter(uint32_t fileHandle, uint32_t event, uint32_t apcRout
         ssize_t read = pread(handle->fd, g_memory.Translate(segmentArray[i]), chunk, offset + total);
         if (read <= 0)
             break;
+        origins::NoteRead(handle->path, segmentArray[i], uint32_t(read));
         total += uint32_t(read);
         if (uint32_t(read) < chunk)
             break;
