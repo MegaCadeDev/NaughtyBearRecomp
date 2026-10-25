@@ -76,4 +76,5 @@ shader store and translator glue, copy shaders), `src/mods/*` (mod support), `sr
 - `ps5/tooling/radv/clc-cache.tar.xz`: Mesa's internal OpenCL kernels for RADV, precompiled
   to SPIR-V (Mesa, MIT), from UnleashedRecomp-Prospero, so building RADV doesn't need
   LLVM's SPIR-V tools.
-- `ps5/sce_sys/icon0.png` is original art, drawn by `ps5/tools/make-icon.py`.
+- `ps5/sce_sys/icon0.png`, the launcher icon, is artwork supplied by the project maintainer
+  (scaled to 512×512). It isn't taken from the game's files. "Naughty Bear" is a trademark of its owners.
