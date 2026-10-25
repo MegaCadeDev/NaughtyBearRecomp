@@ -1,0 +1,50 @@
+# Builds the PC and PS5 versions and puts them in a draft GitHub release.
+#
+# It runs on a self-hosted runner (the maintainer's own machine, labelled "naughtybear"),
+# because building needs the game's Default.xex, which never goes to GitHub: the runner
+# reads it from the folder in the repository variable NB_GAME_DIR. See docs/releasing.md.
+#
+# Started by pushing a version tag (v1.0.0) or by hand from the Actions tab. The release
+# is a draft: it's published by hand after checking it.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag to release (an existing tag, or a new one to create on this commit)"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: [self-hosted, linux, x64, naughtybear]
+    timeout-minutes: 360
+    env:
+      VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+      NB_GAME_DIR: ${{ vars.NB_GAME_DIR }}
+      NB_PS5_DEPS: ${{ vars.NB_PS5_DEPS }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build and package
+        run: tools/package-release.sh "$VERSION"
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd out/release
+          gh release create "$VERSION" --draft --target "$GITHUB_SHA" \
+            --title "Naughty Bear Recompiled $VERSION" --notes-file RELEASE_NOTES.md \
+            NaughtyBearRecomp-*.tar.gz NaughtyBearRecomp-*.zip SHA256SUMS

@@ -136,6 +136,10 @@ translated game to `generated/ppc` (not in the repository). The CMake build comp
 with the runtime, and builds FFmpeg's XMA decoder from `thirdparty/FFmpeg`.
 `libdxcompiler.so` (the shader compiler) is copied next to the executable.
 
+`tools/package-release.sh` builds and packages the PC and PS5 versions for a release, and
+the Release workflow runs it on a self-hosted runner for each version tag: see
+[docs/releasing.md](docs/releasing.md).
+
 ## Project layout
 
 | Path | Contents |
