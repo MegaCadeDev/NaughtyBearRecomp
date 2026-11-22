@@ -1,5 +1,7 @@
-// Switch 2: player 1 is the first controller (Joy-Con 2 pair, Pro Controller or handheld),
-// read through libnx's pad API. Buttons follow their labels (A is the Xbox A button, Plus
+// Switch 2: player 1 is every controller (Joy-Con 2 pair, Pro Controller or handheld),
+// merged, read through libnx's pad API: with HID told of only one player, the right
+// Joy-Con 2 in handheld came through under another ID, and only the left one's buttons
+// reached player 1. Buttons follow their labels (A is the Xbox A button, Plus
 // is Start, Minus is Back); ZL and ZR are the triggers. Rumble is applied from the main loop
 // (hid::Update), as on PC. No USB: controllers come through HID only (see switch2/README.md).
 #if defined(__SWITCH2__)
@@ -45,8 +47,9 @@ namespace
 void hid::Init()
 {
     std::lock_guard lock(g_mutex);
-    padConfigureInput(1, HidNpadStyleSet_NpadStandard);
-    padInitializeDefault(&g_pad);
+    padConfigureInput(8, HidNpadStyleSet_NpadStandard);
+    hidSetNpadJoyAssignmentModeDual(HidNpadIdType_No1); // a Joy-Con pair is one controller
+    padInitializeAny(&g_pad);
     for (auto& devices : g_rumbleDevices)
         devices.ready = R_SUCCEEDED(hidInitializeVibrationDevices(devices.handles, 2, devices.id, devices.style));
     LOGN("Input: player 1's controller (pad API)");
@@ -73,7 +76,13 @@ uint32_t hid::GetState(uint32_t userIndex, XAMINPUT_STATE* state)
     if (connected != wasConnected)
     {
         wasConnected = connected;
-        LOGFN("Input: controller {} (style 0x{:X})", connected ? "connected" : "disconnected", padGetStyleSet(&g_pad));
+        std::string styles;
+        for (uint32_t id = HidNpadIdType_No1; id <= HidNpadIdType_No8; id++)
+            if (uint32_t style = hidGetNpadStyleSet(HidNpadIdType(id)))
+                styles += fmt::format(" No{} 0x{:X}", id + 1, style);
+        if (uint32_t style = hidGetNpadStyleSet(HidNpadIdType_Handheld))
+            styles += fmt::format(" handheld 0x{:X}", style);
+        LOGFN("Input: controller {} (styles:{})", connected ? "connected" : "disconnected", styles);
     }
     if (held != lastHeld && changesLogged < 40)
     {
