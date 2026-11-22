@@ -1,8 +1,10 @@
 // Switch 2: faults reach libnx's exception handler (the PC version uses signals). It logs
 // where the fault happened, as an offset into the program (switch2/tools/symbolize.sh maps it
-// to a function), shows the error screen and ends the process. abort() and failed assertions
-// do the same: newlib calls the __syscall_ hooks here, which libounce doesn't provide (without
-// them, abort() returns to hbmenu with the game's threads still running).
+// to a function), shows the error screen and ends the process. abort() (from LLVM's fatal
+// errors, and failed assertions, whose message newlib writes to stderr first) does the same:
+// abort() is defined here, in place of newlib's, which goes to _exit, back to hbmenu with the
+// game's threads still running. (A SIGABRT handler wouldn't do: newlib's signal table is per
+// thread.)
 //
 // The console output (file descriptors 1 and 2: stdout, stderr, and LLVM's and the driver's
 // messages, which write to the descriptors directly) goes to the log, through libnx's device
@@ -74,26 +76,14 @@ void RedirectConsoleToLog(const char* path)
     devoptab_list[STD_ERR] = &g_logDevice;
 }
 
-[[noreturn]] static void Abort(const char* reason)
-{
-    fprintf(stderr, "\n[nb] %s\n", reason);
-    LogBacktrace();
-    os::process::ShowMessage(std::string("Naughty Bear Recompiled stopped (") + reason + "). See log.txt in its folder.");
-    os::process::Exit(EXIT_FAILURE);
-}
-
 extern "C"
 {
-    void __syscall_abort(void)
+    void abort(void)
     {
-        Abort("abort() was called");
-    }
-
-    void __syscall_assert_func(const char* file, int line, const char* function, const char* expression)
-    {
-        char reason[512];
-        snprintf(reason, sizeof(reason), "assertion failed: %s, in %s at %s:%d", expression, function != nullptr ? function : "?", file, line);
-        Abort(reason);
+        fprintf(stderr, "\n[nb] abort() was called\n");
+        LogBacktrace();
+        os::process::ShowMessage("Naughty Bear Recompiled stopped (abort() was called). See log.txt in its folder.");
+        os::process::Exit(EXIT_FAILURE);
     }
 
     // libnx runs the handler on this stack, so it works when the faulting thread's is spent.

@@ -78,7 +78,8 @@ std::filesystem::path GetSavePath(bool checkForMods)
 void LogBacktrace();
 void RedirectConsoleToLog(const char* path);
 
-// Faults reach libnx's exception handler, not signals (src/os/crash_switch2.cpp).
+// Faults reach libnx's exception handler, not signals, and abort() is replaced (both in
+// src/os/crash_switch2.cpp).
 static void InstallCrashHandler()
 {
 }
