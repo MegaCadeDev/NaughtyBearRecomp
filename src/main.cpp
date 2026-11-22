@@ -264,7 +264,7 @@ int main(int argc, char** argv)
     os::logger::Init();
     setvbuf(stdout, nullptr, _IONBF, 0); // keep log lines when the process dies
 #if defined(__SWITCH2__)
-    for (const char* name : { "NB_NO_BLEND", "NB_NO_DEPTH", "NB_CRASH_TEST", "NB_DEBUG_DRAWS", "NB_FPS" })
+    for (const char* name : { "NB_NO_BLEND", "NB_NO_DEPTH", "NB_CRASH_TEST", "NB_DEBUG_DRAWS", "NB_FPS", "NB_LOG_FILES", "NB_DEBUG_XMA" })
         if (const char* value = getenv(name))
             LOGFN("env.txt: {}={}", name, value);
     if (getenv("NB_CRASH_TEST") != nullptr)
@@ -280,6 +280,9 @@ int main(int argc, char** argv)
         svcGetInfo(&cores, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0);
         LOGFN("Switch 2: memory {} MB, {} MB in use (guest memory included), core mask 0x{:X}, applet type {}", total >> 20, used >> 20,
             cores, int(appletGetAppletType()));
+        uint64_t debugged = 0;
+        Result debuggedResult = svcGetInfo(&debugged, InfoType_DebuggerAttached, INVALID_HANDLE, 0);
+        LOGFN("Switch 2: process debugged {} (result 0x{:X})", debugged, debuggedResult);
     }
 #endif
 

@@ -6,7 +6,7 @@
 # Everything is compiled with devkitA64's GCC; compat/clang_builtins.h supplies the Clang
 # builtins the recompiled code uses.
 cmake_minimum_required(VERSION 3.20)
-project(NaughtyBearSwitch2 C CXX)
+project(NaughtyBearSwitch2 C CXX ASM)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -24,9 +24,9 @@ if (NOT EXISTS ${DEPS}/ffmpeg/lib/libavcodec.a OR NOT EXISTS ${DEPS}/dxc/lib/lib
     message(FATAL_ERROR "Missing dependencies in switch2/.deps: build with switch2/tools/build.sh.")
 endif()
 
-add_compile_options(-O2 -fno-strict-aliasing -fexceptions -include ${CMAKE_CURRENT_SOURCE_DIR}/compat/clang_builtins.h
-    -Wno-unused-label -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-function -Wno-deprecated-declarations
-    -Wno-format -Wno-switch -Wno-invalid-offsetof -Wno-unknown-pragmas -Wno-attributes -Wno-ignored-attributes)
+add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-O2;-fno-strict-aliasing;-fexceptions;-include;${CMAKE_CURRENT_SOURCE_DIR}/compat/clang_builtins.h>"
+    "$<$<COMPILE_LANGUAGE:C,CXX>:-Wno-unused-label;-Wno-unused-variable;-Wno-unused-but-set-variable;-Wno-unused-function;-Wno-deprecated-declarations>"
+    "$<$<COMPILE_LANGUAGE:C,CXX>:-Wno-format;-Wno-switch;-Wno-invalid-offsetof;-Wno-unknown-pragmas;-Wno-attributes;-Wno-ignored-attributes>")
 add_compile_definitions(NDEBUG NOMINMAX NB_CONSOLE)
 # POSIX headers newlib lacks (sys/mman.h, dlfcn.h, ...), defined in compat/posix_extra.c.
 include_directories(SYSTEM ${CMAKE_CURRENT_SOURCE_DIR}/compat/include)
@@ -155,7 +155,10 @@ target_precompile_headers(nb_runtime PRIVATE ${ROOT}/src/stdafx.h)
 # The program. DXC initialises itself in a constructor (DllMain) that nothing refers to, as
 # it's built to be a shared library: it's kept with --undefined.
 file(GLOB DXC_LIBRARIES ${DEPS}/dxc/lib/*.a)
-add_executable(NaughtyBear $<TARGET_OBJECTS:nb_recomp> $<TARGET_OBJECTS:nb_runtime> ${CMAKE_CURRENT_SOURCE_DIR}/compat/posix_extra.c)
+# compat/exception_entry.s: libounce's exception entry without the check that keeps
+# exceptions from the handler under kaiHEN.
+add_executable(NaughtyBear $<TARGET_OBJECTS:nb_recomp> $<TARGET_OBJECTS:nb_runtime> ${CMAKE_CURRENT_SOURCE_DIR}/compat/posix_extra.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/compat/exception_entry.s)
 target_link_options(NaughtyBear PRIVATE -Wl,--undefined=_Z7DllMainv -Wl,-Map=${CMAKE_BINARY_DIR}/NaughtyBear.map)
 target_link_libraries(NaughtyBear PRIVATE
     nb_shader_translator nb_plume nb_thirdparty libzstd_static
