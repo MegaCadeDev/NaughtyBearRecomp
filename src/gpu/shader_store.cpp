@@ -126,6 +126,7 @@ namespace shader_store
         // Find every shader container: in the executable, then in each data package.
         std::map<uint64_t, std::vector<uint8_t>> found;
         Scan((const uint8_t*)g_memory.Translate(g_imageBase), g_imageSize, found);
+        size_t executableShaders = found.size();
 
         std::vector<std::filesystem::path> packageFiles;
         std::error_code ec;
@@ -151,6 +152,8 @@ namespace shader_store
         std::atomic<size_t> next = 0, done = 0, failed = 0;
         std::atomic<uint32_t> finishedWorkers = 0;
         uint32_t threadCount = GetHostCoreCount();
+        LOGFN("Shaders: found {} ({} in the executable) in {} packages; translating on {} threads", work.size(), executableShaders,
+            packageFiles.size(), threadCount);
         for (uint32_t t = 0; t < threadCount; t++)
         {
             StartHostThread([&]
@@ -172,10 +175,17 @@ namespace shader_store
                     finishedWorkers++;
                 });
         }
+        auto lastReport = std::chrono::steady_clock::now();
         while (finishedWorkers < threadCount)
         {
             progress(0.4f + 0.6f * (work.empty() ? 1.0f : float(done) / float(work.size())));
             std::this_thread::sleep_for(std::chrono::milliseconds(33));
+            if (std::chrono::steady_clock::now() - lastReport > std::chrono::seconds(10))
+            {
+                lastReport = std::chrono::steady_clock::now();
+                LOGFN("Shaders: {} of {} translated ({:.0f} s)", done.load(), work.size(),
+                    std::chrono::duration<double>(lastReport - start).count());
+            }
         }
         progress(1.0f);
 

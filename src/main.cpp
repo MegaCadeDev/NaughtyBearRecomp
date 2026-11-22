@@ -57,7 +57,9 @@ std::filesystem::path& GetGamePath()
 static const std::filesystem::path CONSOLE_USER_PATH = "/app0";
 static const char CONSOLE_GAME_FOLDER[] = "/data/homebrew/PPSA99862/game";
 #elif defined(__SWITCH2__)
-static const std::filesystem::path CONSOLE_USER_PATH = "sdmc:/switch/NaughtyBearRecomp";
+// (Without "sdmc:": std::filesystem doesn't see that as absolute and would put the working
+// folder in front. libnx opens /... on the SD card, the device hbmenu starts programs from.)
+static const std::filesystem::path CONSOLE_USER_PATH = "/switch/NaughtyBearRecomp";
 static const char CONSOLE_GAME_FOLDER[] = "/switch/NaughtyBearRecomp/game on the SD card";
 #endif
 #if defined(NB_CONSOLE)
