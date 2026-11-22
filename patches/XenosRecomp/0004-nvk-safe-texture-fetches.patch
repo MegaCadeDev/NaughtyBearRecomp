@@ -1,0 +1,45 @@
+diff --git a/XenosRecomp/shader_common.h b/XenosRecomp/shader_common.h
+index 83ec500..01dc8cc 100644
+--- a/XenosRecomp/shader_common.h
++++ b/XenosRecomp/shader_common.h
+@@ -79,10 +79,29 @@ uint2 getTexture2DDimensions(Texture2D<float4> texture)
+     return dimensions;
+ }
+ 
++// Texture coordinate derivatives with any that isn't finite replaced by 0. On NVK the
++// helper invocations' coordinates can be garbage, so the derivatives of the pixels beside
++// them (along every triangle edge) were too, and an implicit-LOD sample returned zero there.
++// Valid derivatives are unchanged.
++float2 finiteOrZero(float2 value)
++{
++    return select(isfinite(value), value, 0.0);
++}
++
++float3 finiteOrZero(float3 value)
++{
++    return select(isfinite(value), value, 0.0);
++}
++
+ float4 tfetch2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset)
+ {
+     Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
+-    return texture.Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord + offset / getTexture2DDimensions(texture));
++    // The offset only when there is one (a constant zero then leaves out the size query): on
++    // NVK the size reads as 0 in helper invocations, 0 / 0 made their coordinates NaN, and
++    // the derivatives of the pixels next to them broke along every triangle edge.
++    if (any(offset != 0.0))
++        texCoord += offset / getTexture2DDimensions(texture);
++    return texture.SampleGrad(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord, finiteOrZero(ddx(texCoord)), finiteOrZero(ddy(texCoord)));
+ }
+ 
+ float2 getWeights2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset)
+@@ -165,7 +184,8 @@ float4 tfetch2DBicubic(uint resourceDescriptorIndex, uint samplerDescriptorIndex
+ 
+ float4 tfetch3D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord)
+ {
+-    return g_Texture3DDescriptorHeap[resourceDescriptorIndex].Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord);
++    return g_Texture3DDescriptorHeap[resourceDescriptorIndex].SampleGrad(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord,
++        finiteOrZero(ddx(texCoord)), finiteOrZero(ddy(texCoord)));
+ }
+ 
+ struct CubeMapData

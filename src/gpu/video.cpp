@@ -26,7 +26,8 @@
 #include <plume_render_interface.h>
 #include <bit>
 #if defined(__SWITCH2__)
-#include <malloc.h>
+#include <os/switch2.h>
+#include <switch2/memory/heap.h>
 #endif
 #include <deque>
 
@@ -1756,8 +1757,7 @@ namespace
                 g_drawsThisFrame, g_drawsSkippedThisFrame, ms(longestFrame).count(), slowFrames, ms(longestDrawTime).count());
 #if defined(__SWITCH2__)
             // The heap holds everything there (guest memory, the driver's), with no paging.
-            struct mallinfo heap = mallinfo();
-            LOGFN("Memory: heap {} MB in use, {} MB free in it", size_t(heap.uordblks) >> 20, size_t(heap.fordblks) >> 20);
+            LOGFN("Memory: heap {} MB free of {} MB", heapGetFreeSize() >> 20, heapGetTotalSize() >> 20);
 #endif
             lastReport = now;
             longestFrame = longestDrawTime = {};
