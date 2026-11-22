@@ -7,11 +7,37 @@
 #include <kernel/memory.h>
 #include <os/process.h>
 #include <os/switch2.h>
+#include <unwind.h>
 
 extern "C"
 {
     extern char __start__[]; // the program's first byte (libounce's linker script)
+}
 
+// The calls that led here, as offsets into the program (from .eh_frame, with libgcc's
+// unwinder): the terminate handler logs where an unhandled exception was thrown.
+void LogBacktrace()
+{
+    struct State
+    {
+        uintptr_t program;
+        int depth;
+    } state{ reinterpret_cast<uintptr_t>(__start__), 0 };
+    fprintf(stderr, "[nb] backtrace:");
+    _Unwind_Backtrace([](_Unwind_Context* context, void* argument) -> _Unwind_Reason_Code
+        {
+            auto* state = static_cast<State*>(argument);
+            uintptr_t ip = _Unwind_GetIP(context);
+            if (ip == 0 || state->depth++ >= 32)
+                return _URC_END_OF_STACK;
+            fprintf(stderr, " NaughtyBear.elf+0x%llX", (unsigned long long)(ip - state->program));
+            return _URC_NO_REASON;
+        }, &state);
+    fprintf(stderr, "\n");
+}
+
+extern "C"
+{
     // libnx runs the handler on this stack, so it works when the faulting thread's is spent.
     alignas(16) uint8_t __nx_exception_stack[0x8000];
     uint64_t __nx_exception_stack_size = sizeof(__nx_exception_stack);

@@ -110,7 +110,7 @@ namespace shader_store
             LOGN("Shaders: the cache is from another translator version; it will be rebuilt");
         }
 
-        std::thread(SaverThread).detach();
+        StartHostThread(SaverThread);
     }
 
     void Precache(const std::function<void(float)>& progress)

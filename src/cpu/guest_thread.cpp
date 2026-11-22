@@ -166,7 +166,9 @@ void StartHostThread(std::function<void()> function)
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, GetStackSize());
+#if !defined(__SWITCH2__) // (its pthread_create ignores this; detaching isn't supported)
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+#endif
     pthread_t thread;
     const auto ret = pthread_create(&thread, &attr, [](void* argument) -> void*
         {

@@ -72,6 +72,8 @@ std::filesystem::path GetSavePath(bool checkForMods)
 }
 
 #if defined(__SWITCH2__)
+void LogBacktrace(); // src/os/crash_switch2.cpp
+
 // Faults reach libnx's exception handler, not signals (src/os/crash_switch2.cpp).
 static void InstallCrashHandler()
 {
@@ -302,9 +304,13 @@ int main(int argc, char** argv)
 
 #if defined(NB_CONSOLE)
     // An exception nothing catches: logged and shown, and the process ends properly (abort()
-    // would leave on the Switch 2 with the game's threads running).
+    // would leave on the Switch 2 with the game's threads running). The stack isn't unwound
+    // yet, so on the Switch 2 the log gets where it was thrown.
     std::set_terminate([]
         {
+#if defined(__SWITCH2__)
+            LogBacktrace();
+#endif
             std::string what = "unknown exception";
             if (auto exception = std::current_exception())
             {

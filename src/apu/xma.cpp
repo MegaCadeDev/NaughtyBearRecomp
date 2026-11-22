@@ -11,6 +11,7 @@
 // The library functions that write the registers are hooked too, so that a kick is
 // decoded before the library goes on (as with the hardware); the thread is a fallback.
 #include <stdafx.h>
+#include <cpu/guest_thread.h>
 #include "xma.h"
 #include <kernel/heap.h>
 #include <kernel/memory.h>
@@ -479,7 +480,7 @@ namespace xma
 #else
         LOGN_WARNING("XMA: built without FFmpeg; game audio will be silent");
 #endif
-        std::thread(WorkerThread).detach();
+        StartHostThread(WorkerThread);
     }
 
     uint32_t AllocateContext()

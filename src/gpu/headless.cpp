@@ -66,7 +66,7 @@ namespace
 
     void StartHeadlessThread()
     {
-        std::call_once(g_threadStarted, [] { std::thread(HeadlessThread).detach(); });
+        std::call_once(g_threadStarted, [] { StartHostThread(HeadlessThread); });
     }
 }
 

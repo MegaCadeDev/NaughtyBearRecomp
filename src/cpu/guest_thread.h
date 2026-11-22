@@ -71,7 +71,9 @@ struct GuestThreadHandle : KernelObject
 };
 
 // Starts a detached host thread with a stack big enough to run guest code (the game's
-// main thread, the audio thread).
+// main thread, the audio thread), and the runtime's other background threads. Use it rather
+// than std::thread(...).detach(): the Switch 2's C library can't detach a thread (detach()
+// throws "Function not implemented"); this never asks it to.
 void StartHostThread(std::function<void()> function);
 
 // How many threads can run at once: the shader precache starts one worker per core.
