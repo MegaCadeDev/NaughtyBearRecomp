@@ -124,14 +124,17 @@ static void KiSystemStartup()
 
     XAudioInitializeSystem();
     xma::Init();
+    LOGN("Startup: XMA decoder ready");
 }
 
 // Loads the executable into guest memory and returns its entry point.
 static uint32_t LdrLoadModule(const std::filesystem::path& path)
 {
+    LOGFN("Startup: reading {}", path.string());
     auto file = LoadFile(path);
     if (file.empty())
         return 0;
+    LOGFN("Startup: read {} bytes; parsing", file.size());
 
     // XenonUtils handles the XEX encryption and compression.
     auto image = Image::ParseImage(file.data(), file.size());
@@ -224,11 +227,31 @@ int main(int argc, char** argv)
     // folder is created too, so there's a place to copy the game's files to.
     std::error_code directoryError;
     std::filesystem::create_directories(CONSOLE_USER_PATH / "game", directoryError);
+#if defined(__SWITCH2__)
+    // libnx has no dup2: stdout and stderr both append to the log (crash reports and the
+    // driver's messages go to stderr).
+    if (FILE* log = fopen((CONSOLE_USER_PATH / "log.txt").c_str(), "w"))
+        fclose(log);
+    freopen((CONSOLE_USER_PATH / "log.txt").c_str(), "a", stdout);
+    freopen((CONSOLE_USER_PATH / "log.txt").c_str(), "a", stderr);
+    setvbuf(stderr, nullptr, _IONBF, 0);
+#else
     freopen((CONSOLE_USER_PATH / "log.txt").c_str(), "w", stdout);
     dup2(fileno(stdout), fileno(stderr));
 #endif
+#endif
     os::logger::Init();
     setvbuf(stdout, nullptr, _IONBF, 0); // keep log lines when the process dies
+#if defined(__SWITCH2__)
+    {
+        uint64_t total = 0, used = 0, cores = 0;
+        svcGetInfo(&total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
+        svcGetInfo(&used, InfoType_UsedMemorySize, CUR_PROCESS_HANDLE, 0);
+        svcGetInfo(&cores, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0);
+        LOGFN("Switch 2: memory {} MB, {} MB in use (guest memory included), core mask 0x{:X}, applet type {}", total >> 20, used >> 20,
+            cores, int(appletGetAppletType()));
+    }
+#endif
 
     // Options: --mods-menu shows the mods menu even when it's turned off, --no-mods-menu
     // skips it; anything else is the path to the game.
@@ -277,6 +300,31 @@ int main(int argc, char** argv)
     if (g_memory.base == nullptr)
         Fail("Could not reserve the 4 GB guest address space (" + g_memory.error + ").");
 
+#if defined(NB_CONSOLE)
+    // An exception nothing catches: logged and shown, and the process ends properly (abort()
+    // would leave on the Switch 2 with the game's threads running).
+    std::set_terminate([]
+        {
+            std::string what = "unknown exception";
+            if (auto exception = std::current_exception())
+            {
+                try
+                {
+                    std::rethrow_exception(exception);
+                }
+                catch (const std::exception& e)
+                {
+                    what = e.what();
+                }
+                catch (...)
+                {
+                }
+            }
+            Fail("Unhandled exception: " + what);
+        });
+#endif
+
+    LOGN("Startup: kernel");
     KiSystemStartup();
 
     uint32_t entry = LdrLoadModule(xexPath);
