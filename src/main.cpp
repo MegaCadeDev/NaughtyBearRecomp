@@ -78,6 +78,23 @@ std::filesystem::path GetSavePath(bool checkForMods)
 void LogBacktrace();
 void RedirectConsoleToLog(const char* path);
 
+// Settings for testing on the console, which has no command line: NAME=VALUE lines in
+// env.txt, next to the NRO, become environment variables (the NB_ debug variables of the
+// README). This runs before the static initializers that read them.
+__attribute__((constructor(101))) static void LoadEnvironmentFile()
+{
+    std::ifstream file("/switch/NaughtyBearRecomp/env.txt");
+    for (std::string line; std::getline(file, line);)
+    {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+            line.pop_back();
+        auto equals = line.find('=');
+        if (line.empty() || line[0] == '#' || equals == std::string::npos || equals == 0)
+            continue;
+        setenv(line.substr(0, equals).c_str(), line.substr(equals + 1).c_str(), 1);
+    }
+}
+
 // Faults reach libnx's exception handler, not signals, and abort() is replaced (both in
 // src/os/crash_switch2.cpp).
 static void InstallCrashHandler()
@@ -247,6 +264,15 @@ int main(int argc, char** argv)
     os::logger::Init();
     setvbuf(stdout, nullptr, _IONBF, 0); // keep log lines when the process dies
 #if defined(__SWITCH2__)
+    for (const char* name : { "NB_NO_BLEND", "NB_NO_DEPTH", "NB_CRASH_TEST", "NB_DEBUG_DRAWS", "NB_FPS" })
+        if (const char* value = getenv(name))
+            LOGFN("env.txt: {}={}", name, value);
+    if (getenv("NB_CRASH_TEST") != nullptr)
+    {
+        // Does a fault reach the exception handler (and the log)? Under kaiHEN it may not.
+        LOGN("NB_CRASH_TEST: faulting on purpose");
+        *(volatile uint32_t*)uintptr_t(8) = 0;
+    }
     {
         uint64_t total = 0, used = 0, cores = 0;
         svcGetInfo(&total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);

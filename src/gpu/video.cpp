@@ -25,6 +25,9 @@
 #include <user/paths.h>
 #include <plume_render_interface.h>
 #include <bit>
+#if defined(__SWITCH2__)
+#include <malloc.h>
+#endif
 #include <deque>
 
 #include <blit.vert.h>
@@ -1751,6 +1754,11 @@ namespace
             using ms = std::chrono::duration<double, std::milli>;
             LOGFN("Video: {} frames, last frame {} draws ({} skipped); longest frame {:.1f} ms, {} slow, longest draw work {:.1f} ms", presented,
                 g_drawsThisFrame, g_drawsSkippedThisFrame, ms(longestFrame).count(), slowFrames, ms(longestDrawTime).count());
+#if defined(__SWITCH2__)
+            // The heap holds everything there (guest memory, the driver's), with no paging.
+            struct mallinfo heap = mallinfo();
+            LOGFN("Memory: heap {} MB in use, {} MB free in it", size_t(heap.uordblks) >> 20, size_t(heap.fordblks) >> 20);
+#endif
             lastReport = now;
             longestFrame = longestDrawTime = {};
             slowFrames = 0;
