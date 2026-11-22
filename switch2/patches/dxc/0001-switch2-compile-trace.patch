@@ -1,0 +1,93 @@
+diff --git a/tools/clang/tools/dxcompiler/dxcompilerobj.cpp b/tools/clang/tools/dxcompiler/dxcompilerobj.cpp
+index 0ee0d0076..b79726dc9 100644
+--- a/tools/clang/tools/dxcompiler/dxcompilerobj.cpp
++++ b/tools/clang/tools/dxcompiler/dxcompilerobj.cpp
+@@ -63,6 +63,18 @@
+ // SPIRV change starts
+ #ifdef ENABLE_SPIRV_CODEGEN
+ #include "clang/SPIRV/EmitSpirvAction.h"
++
++// Switch 2 (NaughtyBearRecomp): the steps of the first compiles, to stderr. A fault there
++// can't be reported otherwise (kaiHEN doesn't pass exceptions to the program).
++#if defined(__SWITCH__)
++#include <atomic>
++#include <cstdio>
++static std::atomic<int> g_nbTracedCompiles{0};
++static thread_local bool g_nbTrace = false;
++#define NB_DXC_TRACE(step) do { if (g_nbTrace) fprintf(stderr, "[dxc] %s\n", step); } while (0)
++#else
++#define NB_DXC_TRACE(step) do { } while (0)
++#endif
+ #endif
+ // SPIRV change ends
+ 
+@@ -546,12 +558,17 @@ public:
+     bool bCompileStarted = false;
+     bool bPreprocessStarted = false;
+     DxilShaderHash ShaderHashContent;
++#if defined(__SWITCH__)
++    g_nbTrace = g_nbTracedCompiles++ < 2;
++#endif
++    NB_DXC_TRACE("Compile");
+     DxcThreadMalloc TM(m_pMalloc);
+ 
+     try {
+       DefaultFPEnvScope fpEnvScope;
+ 
+       IFT(CreateMemoryStream(m_pMalloc, &pOutputStream));
++      NB_DXC_TRACE("output stream");
+ 
+       // Parse command-line options into DxcOpts
+       int argCountInt;
+@@ -577,6 +594,7 @@ public:
+         }
+       }
+ 
++      NB_DXC_TRACE("options read");
+       bool isPreprocessing = !opts.Preprocess.empty();
+       if (isPreprocessing) {
+         DxcEtw_DXCompilerPreprocess_Start();
+@@ -652,6 +670,7 @@ public:
+       // Convert source code encoding
+       IFC(hlsl::DxcGetBlobAsUtf8(pSourceEncoding, m_pMalloc, &utf8Source,
+                                  opts.DefaultTextCodePage));
++      NB_DXC_TRACE("source as UTF-8");
+ 
+       CComPtr<IDxcBlob> pOutputBlob;
+       dxcutil::DxcArgsFileSystem *msfPtr = dxcutil::CreateDxcArgsFileSystem(
+@@ -661,6 +680,7 @@ public:
+ 
+       ::llvm::sys::fs::AutoPerThreadSystem pts(msf.get());
+       IFTLLVM(pts.error_code());
++      NB_DXC_TRACE("file system");
+ 
+       IFT(pOutputStream.QueryInterface(&pOutputBlob));
+ 
+@@ -702,10 +722,12 @@ public:
+       std::unique_ptr<TextDiagnosticPrinter> diagPrinter =
+           llvm::make_unique<TextDiagnosticPrinter>(
+               w, &compiler.getDiagnosticOpts());
++      NB_DXC_TRACE("compiler instance");
+       SetupCompilerForCompile(compiler, &m_langExtensionsHelper,
+                               pUtf8SourceName, diagPrinter.get(), defines, opts,
+                               pArguments, argCount);
+       msfPtr->SetupForCompilerInstance(compiler);
++      NB_DXC_TRACE("compiler set up");
+ 
+       // The clang entry point (cc1_main) would now create a compiler invocation
+       // from arguments, but depending on the Preprocess option, we either
+@@ -969,10 +991,14 @@ public:
+         compiler.getCodeGenOpts().SpirvOptions = opts.SpirvOptions;
+         clang::EmitSpirvAction action;
+         FrontendInputFile file(pUtf8SourceName, IK_HLSL);
++        NB_DXC_TRACE("SPIR-V: begin source");
+         action.BeginSourceFile(compiler, file);
++        NB_DXC_TRACE("SPIR-V: execute (parse and emit)");
+         action.Execute();
++        NB_DXC_TRACE("SPIR-V: end source");
+         action.EndSourceFile();
+         outStream.flush();
++        NB_DXC_TRACE("SPIR-V: done");
+       }
+ #endif
+       // SPIRV change ends

@@ -7,8 +7,8 @@
 #   2. dependencies, in that image: FFmpeg's XMA decoder, DXC, and OunceVK prepared for volk
 #      (into switch2/.deps);
 #   3. the game and runtime, compiled and linked into the NRO with switch2/CMakeLists.txt;
-#   4. a check that nothing in the program uses USB (see below), and the folder for the SD
-#      card.
+#   4. checks that nothing in the program uses USB (see below) or reads the thread register
+#      directly (code built without libnx's TLS flags), and the folder for the SD card.
 #
 # No USB: under kaiHEN, a program that used USB host (libusbhsfs, on usb:hs) left hbmenu
 # black after it closed, until kaiHEN was started again (found with the Dolphin-NS2 port).
@@ -51,6 +51,13 @@ echo "==> [4/4] Checking and staging $DIST"
 usb=$("$DEVKIT" sh -c '$DEVKITPRO/devkitA64/bin/aarch64-none-elf-nm switch2/build/cmake/NaughtyBear.elf' | grep -E ' [TtDdBb] (usbHs|usbDs|usbComms|usbHsFs)' || true)
 if [[ -n $usb ]]; then
     printf 'error: the program uses USB, which breaks hbmenu under kaiHEN:\n%s\n' "$usb" >&2
+    exit 1
+fi
+# Code built without libnx's thread-local storage flags (-mtp=soft) reads the thread register
+# directly, and faults on its first thread_local variable: fail the build if any is linked in.
+tls=$("$DEVKIT" sh -c '$DEVKITPRO/devkitA64/bin/aarch64-none-elf-objdump -d switch2/build/cmake/NaughtyBear.elf' | grep -c 'mrs.*tpidr_el0' || true)
+if [[ $tls != 0 ]]; then
+    echo "error: $tls instructions read tpidr_el0: a library was built without -mtp=soft" >&2
     exit 1
 fi
 rm -rf -- "$DIST"

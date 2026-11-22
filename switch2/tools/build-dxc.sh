@@ -18,7 +18,10 @@ build="$root/.deps/work/dxc-switch2"
 prefix="$root/.deps/dxc"
 logs="$root/.deps/work"
 
-if [[ -f $prefix/.version && $(<"$prefix/.version") == "$version+switch-locale" ]]; then
+# The patches in switch2/patches/dxc, and the build script's own changes below, are part of
+# the version stamp: changing them rebuilds the libraries.
+stamp="$version+$(cat "$root"/patches/dxc/*.patch "${BASH_SOURCE[0]}" | sha1sum | cut -c1-12)"
+if [[ -f $prefix/.version && $(<"$prefix/.version") == "$stamp" ]]; then
     exit 0
 fi
 
@@ -48,8 +51,9 @@ grep -q "__SWITCH__" "$source/lib/DxcSupport/Unicode.cpp" || sed -i \
     -e 's/^  if (prevLocale)$/#ifndef __SWITCH__\n  if (prevLocale)/' \
     -e 's/^    setlocale(LC_ALL, prevLocale);$/    setlocale(LC_ALL, prevLocale);\n#endif/' \
     "$source/lib/DxcSupport/Unicode.cpp"
-# The checkout's version stamp, so the libraries are rebuilt after the source changes.
-dxc_version="$version+switch-locale"
+for patch in "$root"/patches/dxc/*.patch; do
+    git -C "$source" apply --reverse --check "$patch" 2> /dev/null || git -C "$source" apply "$patch"
+done
 
 # SPIRV-Tools lists the systems it builds for: the Switch is built as FreeBSD (which only
 # decides whether its timers are on).
@@ -65,8 +69,13 @@ cmake --build "$host" --target llvm-tblgen clang-tblgen > "$logs/dxc-host-build.
 
 echo "==> [dxc] dxcompiler for the Switch 2"
 # newlib's headers lack a few POSIX declarations: compat/include has them, and two signal
-# flags LLVM's crash handler sets (it never runs: faults reach libnx's handler).
+# flags LLVM's crash handler sets (it never runs). They're given in CFLAGS and CXXFLAGS,
+# which CMake adds to the toolchain's flags: -DCMAKE_CXX_FLAGS would replace those, and
+# with them -mtp=soft and -ftls-model=local-exec, libnx's thread-local storage (without
+# them DXC's thread_local variables fault), and __SWITCH__.
 compat_flags="-isystem $root/compat/include -DSA_NODEFER=0x40000000 -DSA_RESETHAND=0x80000000"
+rm -rf "$build"
+CFLAGS="$compat_flags" CXXFLAGS="$compat_flags -Wno-error" \
 cmake -S "$source" -B "$build" -G Ninja -C "$source/cmake/caches/PredefinedParams.cmake" \
     -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/libounce/cmake/Switch2.cmake" -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_SYSTEM_NAME=NintendoSwitch -DUNIX=ON \
@@ -76,7 +85,6 @@ cmake -S "$source" -B "$build" -G Ninja -C "$source/cmake/caches/PredefinedParam
     -DLLVM_BUILD_TOOLS=OFF -DLLVM_INCLUDE_UTILS=OFF -DLLVM_ENABLE_TERMINFO=OFF -DLLVM_ENABLE_ZLIB=OFF \
     -DLLVM_ENABLE_THREADS=ON -DLLVM_APPEND_VC_REV=OFF -DLLVM_ENABLE_WERROR=OFF \
     -DHAVE_GETPAGESIZE=1 \
-    -DCMAKE_C_FLAGS="$compat_flags" -DCMAKE_CXX_FLAGS="$compat_flags -Wno-error" \
     > "$logs/dxc-switch2-configure.log"
 # dxcompiler, and the libraries it uses that its static build doesn't pull in itself.
 cmake --build "$build" --target dxcompiler LLVMPassPrinters LLVMDxilCompression LLVMDxilPIXPasses > "$logs/dxc-switch2-build.log"
@@ -85,5 +93,5 @@ rm -rf "$prefix"
 mkdir -p "$prefix/lib" "$prefix/include"
 cp "$build"/lib/*.a "$prefix/lib/"
 cp -r "$source/include/dxc" "$prefix/include/"
-printf '%s\n' "$dxc_version" > "$prefix/.version"
+printf '%s\n' "$stamp" > "$prefix/.version"
 echo "==> [dxc] built DXC $version into $prefix"
