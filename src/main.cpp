@@ -74,7 +74,9 @@ std::filesystem::path GetSavePath(bool checkForMods)
 }
 
 #if defined(__SWITCH2__)
-void LogBacktrace(); // src/os/crash_switch2.cpp
+// src/os/crash_switch2.cpp
+void LogBacktrace();
+void RedirectConsoleToLog(const char* path);
 
 // Faults reach libnx's exception handler, not signals (src/os/crash_switch2.cpp).
 static void InstallCrashHandler()
@@ -232,12 +234,9 @@ int main(int argc, char** argv)
     std::error_code directoryError;
     std::filesystem::create_directories(CONSOLE_USER_PATH / "game", directoryError);
 #if defined(__SWITCH2__)
-    // libnx has no dup2: stdout and stderr both append to the log (crash reports and the
-    // driver's messages go to stderr).
-    if (FILE* log = fopen((CONSOLE_USER_PATH / "log.txt").c_str(), "w"))
-        fclose(log);
-    freopen((CONSOLE_USER_PATH / "log.txt").c_str(), "a", stdout);
-    freopen((CONSOLE_USER_PATH / "log.txt").c_str(), "a", stderr);
+    // libnx has no dup2: its console devices are pointed at the log instead, which catches
+    // stdout, stderr and what writes to their descriptors directly (LLVM, the driver).
+    RedirectConsoleToLog((CONSOLE_USER_PATH / "log.txt").c_str());
     setvbuf(stderr, nullptr, _IONBF, 0);
 #else
     freopen((CONSOLE_USER_PATH / "log.txt").c_str(), "w", stdout);
