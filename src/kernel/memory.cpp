@@ -70,7 +70,13 @@ Memory::Memory()
     }
     memset(base, 0, PPC_MEMORY_SIZE);
 #else
-    base = (uint8_t*)mmap((void*)0x100000000ull, PPC_MEMORY_SIZE, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    // NB_GUEST_BASE=address places guest memory there: one that isn't 4 GB-aligned, as the
+    // Switch 2's (from the heap), shows code that takes host pointers truncated to 32 bits
+    // for guest addresses.
+    void* address = (void*)0x100000000ull;
+    if (const char* requested = getenv("NB_GUEST_BASE"))
+        address = (void*)std::strtoull(requested, nullptr, 16);
+    base = (uint8_t*)mmap(address, PPC_MEMORY_SIZE, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
 
     if (base == (uint8_t*)MAP_FAILED)
         base = (uint8_t*)mmap(NULL, PPC_MEMORY_SIZE, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);

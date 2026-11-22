@@ -267,12 +267,6 @@ int main(int argc, char** argv)
     for (const char* name : { "NB_NO_BLEND", "NB_NO_DEPTH", "NB_CRASH_TEST", "NB_DEBUG_DRAWS", "NB_FPS", "NB_LOG_FILES", "NB_DEBUG_XMA" })
         if (const char* value = getenv(name))
             LOGFN("env.txt: {}={}", name, value);
-    if (getenv("NB_CRASH_TEST") != nullptr)
-    {
-        // Does a fault reach the exception handler (and the log)? Under kaiHEN it may not.
-        LOGN("NB_CRASH_TEST: faulting on purpose");
-        *(volatile uint32_t*)uintptr_t(8) = 0;
-    }
     {
         uint64_t total = 0, used = 0, cores = 0;
         svcGetInfo(&total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
@@ -283,6 +277,12 @@ int main(int argc, char** argv)
         uint64_t debugged = 0;
         Result debuggedResult = svcGetInfo(&debugged, InfoType_DebuggerAttached, INVALID_HANDLE, 0);
         LOGFN("Switch 2: process debugged {} (result 0x{:X})", debugged, debuggedResult);
+    }
+    if (getenv("NB_CRASH_TEST") != nullptr)
+    {
+        // Does a fault reach the exception handler (and the log)? Under kaiHEN it may not.
+        LOGN("NB_CRASH_TEST: faulting on purpose");
+        *(volatile uint32_t*)uintptr_t(8) = 0;
     }
 #endif
 
