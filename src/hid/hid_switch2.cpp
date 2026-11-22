@@ -62,12 +62,31 @@ uint32_t hid::GetState(uint32_t userIndex, XAMINPUT_STATE* state)
 
     std::lock_guard lock(g_mutex);
     padUpdate(&g_pad);
-    if (!padIsConnected(&g_pad))
+    bool connected = padIsConnected(&g_pad);
+    uint64_t held = connected ? padGetButtons(&g_pad) : 0;
+
+    // What the controller reports, while the input is being brought up: connection changes,
+    // and the first changes of the buttons with the controller's style.
+    static bool wasConnected = false;
+    static uint64_t lastHeld = 0;
+    static int changesLogged = 0;
+    if (connected != wasConnected)
+    {
+        wasConnected = connected;
+        LOGFN("Input: controller {} (style 0x{:X})", connected ? "connected" : "disconnected", padGetStyleSet(&g_pad));
+    }
+    if (held != lastHeld && changesLogged < 40)
+    {
+        lastHeld = held;
+        changesLogged++;
+        LOGFN("Input: buttons 0x{:X}, style 0x{:X}, sticks ({}, {}) ({}, {})", held, padGetStyleSet(&g_pad), padGetStickPos(&g_pad, 0).x,
+            padGetStickPos(&g_pad, 0).y, padGetStickPos(&g_pad, 1).x, padGetStickPos(&g_pad, 1).y);
+    }
+    if (!connected)
         return ERROR_DEVICE_NOT_CONNECTED;
 
     state->dwPacketNumber = g_packetNumber++;
     XAMINPUT_GAMEPAD& pad = state->Gamepad;
-    uint64_t held = padGetButtons(&g_pad);
     const std::pair<uint64_t, uint16_t> buttons[] =
     {
         { HidNpadButton_Up, XAMINPUT_GAMEPAD_DPAD_UP }, { HidNpadButton_Down, XAMINPUT_GAMEPAD_DPAD_DOWN },
