@@ -23,7 +23,7 @@ endif()
 add_compile_options(-O2 -ffunction-sections -fdata-sections -fno-strict-aliasing -fexceptions -funwind-tables
     -Wno-unused-label -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-function -Wno-deprecated-declarations
     -Wno-null-arithmetic -Wno-null-conversion -Wno-format -Wno-switch -Wno-invalid-offsetof)
-add_compile_definitions(NDEBUG NOMINMAX)
+add_compile_definitions(NDEBUG NOMINMAX NB_CONSOLE)
 
 # The recompiled game code.
 file(GLOB RECOMP_SOURCES CONFIGURE_DEPENDS ${GENERATED_DIR}/ppc_recomp.*.cpp)

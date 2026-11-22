@@ -1,4 +1,4 @@
-#if !defined(__PROSPERO__) // the PS5 version has no the mods menu
+#if !defined(NB_CONSOLE) // the console versions have no mods menu
 
 #include <stdafx.h>
 #include "launcher.h"

@@ -78,3 +78,18 @@ shader store and translator glue, copy shaders), `src/mods/*` (mod support), `sr
   LLVM's SPIR-V tools.
 - `ps5/sce_sys/icon0.png`, the launcher icon, is artwork supplied by the project maintainer
   (scaled to 512×512). It isn't taken from the game's files. "Naughty Bear" is a trademark of its owners.
+
+## Switch 2 version
+
+- Built with [ounce-devkit](https://github.com/ouncebrew/ounce-devkit) (MIT), downloaded by
+  `switch2/tools/build.sh`, not included: devkitPro's devkitA64 (GCC, newlib), and linked
+  into the NRO, [libounce](https://github.com/ouncebrew/libounce) (ISC, based on libnx, ISC)
+  and [OunceVK](https://github.com/ouncebrew/ouncevk) (Mesa's NVK driver, MIT). As on the
+  PS5, FFmpeg's XMA decoder (LGPL-2.1+) and DXC v1.8.2407 (University of Illinois/NCSA)
+  are built for it, by `switch2/tools/build-ffmpeg.sh` and `switch2/tools/build-dxc.sh`.
+- `switch2/tools/prepare-ouncevk.sh` follows Dolphin-NS2's `prepare_ouncevk.sh` (the
+  maintainer's Switch 2 port of dolphin-nx).
+- `switch2/compat/` (Clang builtins for GCC, POSIX functions newlib lacks),
+  `src/hid/hid_switch2.cpp`, `src/apu/driver/switch2_driver.cpp`, `src/os/crash_switch2.cpp`,
+  `src/os/switch2.h` and `patches/plume/0003` were written for this project.
+- `switch2/icon.jpg` is the PS5 icon's artwork, scaled to 256×256.

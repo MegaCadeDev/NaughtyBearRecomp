@@ -8,8 +8,8 @@
 
 namespace origins
 {
-#if defined(__PROSPERO__)
-    // Only mods need this; the PS5 version has none.
+#if defined(NB_CONSOLE)
+    // Only mods need this; the console versions have none.
     inline void NoteRead(const std::filesystem::path&, uint32_t, uint32_t) {}
     inline void NoteDecompress(uint32_t, uint32_t, uint32_t) {}
     inline void NoteCopy(uint32_t, uint32_t, uint32_t) {}

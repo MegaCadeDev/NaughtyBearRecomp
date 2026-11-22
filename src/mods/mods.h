@@ -70,8 +70,8 @@ namespace mods
         std::string meshes;    // mesh mods: what they replace, for display
     };
 
-#if defined(__PROSPERO__)
-    // The PS5 version has no mod support: nothing is ever replaced.
+#if defined(NB_CONSOLE)
+    // The console versions have no mod support: nothing is ever replaced.
     inline const std::vector<Character>& Characters() { static const std::vector<Character> none; return none; }
     inline std::vector<ModInfo> List(const std::filesystem::path&) { return {}; }
     inline bool ShowMenu(const std::filesystem::path&) { return false; }

@@ -31,3 +31,8 @@ save/
 /ps5/dist/
 /ps5/pkg/
 /ps5/runtime/libc.prx
+
+# Switch 2 build: downloaded dependencies and build output
+/switch2/.deps/
+/switch2/build/
+/switch2/dist/

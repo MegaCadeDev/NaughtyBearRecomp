@@ -58,6 +58,17 @@ Memory::Memory()
     }
 
     mprotect(base, 4096, PROT_NONE);
+#elif defined(__SWITCH2__)
+    // Switch 2: no memory is committed lazily, so the 4 GB are allocated from the heap, all
+    // of it (a kaiHEN program has about 9 GB). It's cleared: the heap may still hold what an
+    // earlier program left. The first page isn't protected (the heap can't be).
+    base = (uint8_t*)aligned_alloc(0x10000, PPC_MEMORY_SIZE);
+    if (base == nullptr)
+    {
+        error = "4 GB from the heap: out of memory";
+        return;
+    }
+    memset(base, 0, PPC_MEMORY_SIZE);
 #else
     base = (uint8_t*)mmap((void*)0x100000000ull, PPC_MEMORY_SIZE, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
 

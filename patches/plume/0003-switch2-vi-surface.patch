@@ -1,0 +1,142 @@
+diff --git a/plume_render_interface_types.h b/plume_render_interface_types.h
+index 1bd6989..ecf0b98 100644
+--- a/plume_render_interface_types.h
++++ b/plume_render_interface_types.h
+@@ -19,8 +19,8 @@
+ #include <Windows.h>
+ #elif defined(__ANDROID__)
+ #include "android/native_window.h"
+-#elif defined(__PROSPERO__)
+-// PS5 homebrew: no window system.
++#elif defined(__PROSPERO__) || defined(__SWITCH2__)
++// PS5 and Switch 2 homebrew: no window system.
+ #elif defined(__linux__)
+ #include "X11/Xlib.h"
+ #undef None
+@@ -43,8 +43,9 @@ namespace plume {
+     typedef ANativeWindow* RenderWindow;
+ #elif defined(SDL_VULKAN_ENABLED)
+     typedef SDL_Window *RenderWindow;
+-#elif defined(__PROSPERO__)
+-    // PS5 homebrew: the swap chain presents to the display; there's no window.
++#elif defined(__PROSPERO__) || defined(__SWITCH2__)
++    // PS5 and Switch 2 homebrew: the swap chain presents to the display (on the Switch 2,
++    // the default layer); there's no window.
+     struct RenderWindow {
+         bool operator==(const struct RenderWindow& rhs) const { return true; }
+         bool operator!=(const struct RenderWindow& rhs) const { return false; }
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index 6504527..036bc05 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -27,15 +27,19 @@
+ // TODO:
+ // - Fix resource pools.
+ 
++#if defined(__SWITCH2__)
++#include <switch.h>
++#endif
++
+ namespace plume {
+-#if defined(__PROSPERO__)
+-    // PS5 homebrew (adapted from UnleashedRecomp-Prospero's plume, GPL-3.0): RADV is linked
+-    // statically and presents to the display through VK_KHR_display.
+-    extern "C" int sceSystemServiceHideSplashScreen();
++#if defined(__PROSPERO__) || defined(__SWITCH2__)
++    // PS5 and Switch 2 homebrew (adapted from UnleashedRecomp-Prospero's plume, GPL-3.0): the
++    // driver (RADV, OunceVK) is linked statically, with no Vulkan loader. The PS5 presents
++    // to the display through VK_KHR_display, the Switch 2 to its default window.
+     extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName) __attribute__((weak));
+ 
+     // The driver's entry points, with the Vulkan 1.1 names of two KHR functions volk asks for.
+-    static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL ps5GetInstanceProcAddr(VkInstance instance, const char *pName) {
++    static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL icdGetInstanceProcAddr(VkInstance instance, const char *pName) {
+         if (vk_icdGetInstanceProcAddr == nullptr || pName == nullptr) {
+             return nullptr;
+         }
+@@ -51,6 +55,10 @@ namespace plume {
+         }
+         return nullptr;
+     }
++#endif
++
++#if defined(__PROSPERO__)
++    extern "C" int sceSystemServiceHideSplashScreen();
+ 
+     // A surface on the display's first plane, in 4K if the display has it.
+     static VkResult createDisplaySurface(VkInstance instance, VkPhysicalDevice physicalDevice, VkSurfaceKHR *outSurface, VkExtent2D *outExtent) {
+@@ -149,6 +157,8 @@ namespace plume {
+         VK_KHR_ANDROID_SURFACE_EXTENSION_NAME,
+ #   elif defined(__PROSPERO__)
+         VK_KHR_DISPLAY_EXTENSION_NAME,
++#   elif defined(__SWITCH2__)
++        VK_NN_VI_SURFACE_EXTENSION_NAME,
+ #   elif defined(__linux__)
+         VK_KHR_XLIB_SURFACE_EXTENSION_NAME,
+ #   elif defined(__APPLE__)
+@@ -2202,6 +2212,20 @@ namespace plume {
+             fprintf(stderr, "createDisplaySurface failed with error code 0x%X.\n", res);
+             return;
+         }
++#   elif defined(__SWITCH2__)
++        // The default window (layer), at 1080p: the screen's size, and docked the console
++        // scales it to the TV.
++        NWindow *window = nwindowGetDefault();
++        nwindowSetDimensions(window, displayExtent.width, displayExtent.height);
++        VkViSurfaceCreateInfoNN surfaceCreateInfo = {};
++        surfaceCreateInfo.sType = VK_STRUCTURE_TYPE_VI_SURFACE_CREATE_INFO_NN;
++        surfaceCreateInfo.window = window;
++        VulkanInterface *renderInterface = commandQueue->device->renderInterface;
++        res = vkCreateViSurfaceNN(renderInterface->instance, &surfaceCreateInfo, nullptr, &surface);
++        if (res != VK_SUCCESS) {
++            fprintf(stderr, "vkCreateViSurfaceNN failed with error code 0x%X.\n", res);
++            return;
++        }
+ #   elif defined(__linux__)
+         assert(renderWindow.display != 0);
+         assert(renderWindow.window != 0);
+@@ -2545,7 +2569,7 @@ namespace plume {
+ #   elif defined(__ANDROID__)
+         dstWidth = ANativeWindow_getWidth(renderWindow);
+         dstHeight = ANativeWindow_getHeight(renderWindow);
+-#   elif defined(__PROSPERO__)
++#   elif defined(__PROSPERO__) || defined(__SWITCH2__)
+         dstWidth = displayExtent.width;
+         dstHeight = displayExtent.height;
+ #   elif defined(__linux__)
+@@ -4528,8 +4552,8 @@ namespace plume {
+ #else
+     VulkanInterface::VulkanInterface() {
+ #endif
+-#if defined(__PROSPERO__)
+-        volkInitializeCustom(ps5GetInstanceProcAddr);
++#if defined(__PROSPERO__) || defined(__SWITCH2__)
++        volkInitializeCustom(icdGetInstanceProcAddr);
+         VkResult res;
+ #else
+         VkResult res = volkInitialize();
+diff --git a/plume_vulkan.h b/plume_vulkan.h
+index e57cf69..2c42811 100644
+--- a/plume_vulkan.h
++++ b/plume_vulkan.h
+@@ -20,6 +20,11 @@
+ #define VK_USE_PLATFORM_ANDROID_KHR
+ #elif defined(__PROSPERO__)
+ // PS5 homebrew: RADV presents through VK_KHR_display, which needs no platform define.
++#elif defined(__SWITCH2__)
++// Switch 2 homebrew: OunceVK (NVK) presents to the default window through VK_NN_vi_surface.
++#ifndef VK_USE_PLATFORM_VI_NN
++#define VK_USE_PLATFORM_VI_NN
++#endif
+ #elif defined(__linux__)
+ #define VK_USE_PLATFORM_XLIB_KHR
+ #elif defined(__APPLE__)
+@@ -229,6 +234,8 @@ namespace plume {
+         VkSurfaceKHR surface = VK_NULL_HANDLE;
+ #   if defined(__PROSPERO__)
+         VkExtent2D displayExtent = { 3840, 2160 };
++#   elif defined(__SWITCH2__)
++        VkExtent2D displayExtent = { 1920, 1080 };
+ #   endif
+         RenderWindow renderWindow = {};
+ #if defined(__APPLE__)

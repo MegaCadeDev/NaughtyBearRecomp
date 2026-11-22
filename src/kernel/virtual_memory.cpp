@@ -46,8 +46,13 @@ namespace
 
     void ZeroRange(uint32_t address, uint32_t size)
     {
+#if defined(__SWITCH2__)
+        // Guest memory is ordinary heap memory there (see memory.cpp).
+        memset(g_memory.Translate(address), 0, size);
+#else
         // Dropping the pages makes the private anonymous mapping read back as zeroes.
         madvise(g_memory.Translate(address), size, MADV_DONTNEED);
+#endif
     }
 
     // Finds the reservation containing address, or end().

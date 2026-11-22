@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Builds the PC and PS5 versions from a clean recompile and packages them for a release, in
-# out/release:
+# Builds the PC, PS5 and Switch 2 versions from a clean recompile and packages them for a
+# release, in out/release:
 #
 #   NaughtyBearRecomp-<version>-linux-x64.tar.gz   the PC version (executable, DXC, docs)
 #   NaughtyBearRecomp-<version>-ps5-PPSA99862.zip  the PS5 title folder, for /data/homebrew
+#   NaughtyBearRecomp-<version>-switch2.zip        the Switch 2 NRO in its SD card folder
 #   SHA256SUMS, RELEASE_NOTES.md
 #
-# usage: tools/package-release.sh [--pc-only | --ps5-only] [version]
+# usage: tools/package-release.sh [--pc-only | --ps5-only | --switch2-only] [version]
 #
 # The version defaults to `git describe`. Recompiling needs the game's Default.xex in
 # game/Naughty_Bear; NB_GAME_DIR (the folder with Default.xex) links it there instead, for a
@@ -21,12 +22,14 @@ cd "$root"
 
 build_pc=1
 build_ps5=1
+build_switch2=1
 version=""
 for arg in "$@"; do
     case $arg in
-        --pc-only) build_ps5=0 ;;
-        --ps5-only) build_pc=0 ;;
-        -*) echo "usage: $0 [--pc-only | --ps5-only] [version]" >&2; exit 2 ;;
+        --pc-only) build_ps5=0; build_switch2=0 ;;
+        --ps5-only) build_pc=0; build_switch2=0 ;;
+        --switch2-only) build_pc=0; build_ps5=0 ;;
+        -*) echo "usage: $0 [--pc-only | --ps5-only | --switch2-only] [version]" >&2; exit 2 ;;
         *) version=$arg ;;
     esac
 done
@@ -48,7 +51,7 @@ if [[ -n ${NB_PS5_DEPS:-} && ! -e ps5/.deps ]]; then
 fi
 
 rm -rf "$out"
-mkdir -p "$out"
+mkdir -p "$out/stage"
 assets=()
 
 # Fails if a package holds any of the game's files.
@@ -91,6 +94,16 @@ if (( build_ps5 )); then
     assets+=("$name-ps5-$title_id.zip")
 fi
 
+if (( build_switch2 )); then
+    echo "==> Switch 2 version"
+    make -C switch2 NB_VERSION="${version#v}"
+    rm -f "$out/$name-switch2.zip"
+    (cd switch2/dist && zip -qr "$out/$name-switch2.zip" switch)
+    zipinfo -1 "$out/$name-switch2.zip" > "$out/stage/switch2.txt"
+    check_contents "$out/stage/switch2.txt" "the Switch 2 package"
+    assets+=("$name-switch2.zip")
+fi
+
 (cd "$out" && sha256sum "${assets[@]}" > SHA256SUMS)
 
 cat > "$out/RELEASE_NOTES.md" <<NOTES
@@ -111,6 +124,12 @@ libvulkan1\`). The first start prepares the game's shaders (a few seconds).
 \`$name-ps5-$title_id.zip\`: copy the \`$title_id\` folder to \`/data/homebrew/$title_id\` on
 the console, then the game's files into \`/data/homebrew/$title_id/game\`. Start it from the
 homebrew launcher. The first start translates the game's shaders, with a progress bar.
+
+### Switch 2 (kaiHEN homebrew)
+
+\`$name-switch2.zip\`: copy its \`switch\` folder to the SD card's root, then the game's files
+into \`/switch/NaughtyBearRecomp/game\`. Start it from hbmenu. The first start translates the
+game's shaders, with a progress bar.
 
 See README.md and NOTICE.md (in the PC download, and in the repository) for details and
 licences. Checksums are in SHA256SUMS.

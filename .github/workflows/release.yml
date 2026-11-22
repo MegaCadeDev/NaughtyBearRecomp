@@ -1,4 +1,4 @@
-# Builds the PC and PS5 versions and puts them in a draft GitHub release.
+# Builds the PC, PS5 and Switch 2 versions and puts them in a draft GitHub release.
 #
 # It runs on a self-hosted runner (the maintainer's own machine, labelled "naughtybear"),
 # because building needs the game's Default.xex, which never goes to GitHub: the runner

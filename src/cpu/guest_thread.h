@@ -5,8 +5,8 @@
 #include <functional>
 #include <mutex>
 
-// Use pthreads directly on macOS and the PS5 to be able to increase default stack size.
-#if defined(__APPLE__) || defined(__PROSPERO__)
+// Use pthreads directly on macOS and the consoles to be able to increase default stack size.
+#if defined(__APPLE__) || defined(__PROSPERO__) || defined(__SWITCH2__)
 #define USE_PTHREAD 1
 #endif
 
@@ -73,6 +73,9 @@ struct GuestThreadHandle : KernelObject
 // Starts a detached host thread with a stack big enough to run guest code (the game's
 // main thread, the audio thread).
 void StartHostThread(std::function<void()> function);
+
+// How many threads can run at once: the shader precache starts one worker per core.
+uint32_t GetHostCoreCount();
 
 // Thrown by ExTerminateThread to unwind the guest thread back to GuestThread::Start.
 struct GuestThreadExit

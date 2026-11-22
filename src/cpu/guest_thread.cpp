@@ -4,6 +4,9 @@
 #include <kernel/heap.h>
 #include <kernel/function.h>
 #include "ppc_context.h"
+#if defined(__SWITCH2__)
+#include <os/switch2.h>
+#endif
 
 constexpr size_t PCR_SIZE = 0xAB0;
 constexpr size_t TLS_SIZE = 0x100;
@@ -44,6 +47,49 @@ GuestThreadContext::~GuestThreadContext()
 // main thread, get one that nothing can queue to).
 static thread_local GuestApcQueue* g_currentApcQueue;
 
+#if defined(__SWITCH2__)
+// The cores the process may use (a kaiHEN program gets six).
+static uint64_t GetCoreMask()
+{
+    static uint64_t mask = []
+        {
+            uint64_t value = 0;
+            if (R_FAILED(svcGetInfo(&value, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0)) || value == 0)
+                value = 1;
+            return value;
+        }();
+    return mask;
+}
+
+// libnx starts every thread on the process's default core. Each one gets the next core in
+// turn as its preferred core, and may run on any of them.
+static void PlaceOnCore()
+{
+    static std::atomic<uint32_t> next = 0;
+    uint64_t mask = GetCoreMask();
+    uint32_t index = next++ % uint32_t(std::popcount(mask));
+    int32_t core = 0;
+    for (uint64_t remaining = mask; remaining != 0; remaining &= remaining - 1, index--)
+    {
+        if (index == 0)
+        {
+            core = std::countr_zero(remaining);
+            break;
+        }
+    }
+    svcSetThreadCoreMask(CUR_THREAD_HANDLE, core, uint32_t(mask));
+}
+#endif
+
+uint32_t GetHostCoreCount()
+{
+#if defined(__SWITCH2__)
+    return uint32_t(std::popcount(GetCoreMask()));
+#else
+    return std::max(1u, std::thread::hardware_concurrency());
+#endif
+}
+
 #ifdef USE_PTHREAD
 static size_t GetStackSize()
 {
@@ -53,8 +99,9 @@ static size_t GetStackSize()
     {
         // 8 MiB is a typical default.
         constexpr auto defaultSize = 8 * 1024 * 1024;
-#if defined(__PROSPERO__)
-        // The PS5's default is far smaller than recompiled code needs, and it has no limit to ask.
+#if defined(__PROSPERO__) || defined(__SWITCH2__)
+        // The consoles' defaults are far smaller than recompiled code needs, and they have no
+        // limit to ask.
         stackSize = defaultSize;
 #else
         struct rlimit lim;
@@ -79,6 +126,9 @@ static void* GuestThreadFunc(void* arg)
 #else
 static void GuestThreadFunc(GuestThreadHandle* hThread)
 {
+#endif
+#if defined(__SWITCH2__)
+    PlaceOnCore();
 #endif
     hThread->suspended.wait(true);
     g_currentApcQueue = &hThread->apcQueue;
@@ -121,6 +171,9 @@ void StartHostThread(std::function<void()> function)
     const auto ret = pthread_create(&thread, &attr, [](void* argument) -> void*
         {
             std::unique_ptr<std::function<void()>> function((std::function<void()>*)argument);
+#if defined(__SWITCH2__)
+            PlaceOnCore();
+#endif
             (*function)();
             return nullptr;
         }, start);

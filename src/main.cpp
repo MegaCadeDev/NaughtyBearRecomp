@@ -15,9 +15,12 @@
 #include <os/logger.h>
 #include <os/process.h>
 #include <user/paths.h>
-#if !defined(__PROSPERO__)
+#if !defined(NB_CONSOLE)
 #include <ui/launcher.h>
 #include <SDL.h>
+#endif
+#if defined(__SWITCH2__)
+#include <os/switch2.h>
 #endif
 
 #include <file.h>
@@ -46,12 +49,19 @@ std::filesystem::path& GetGamePath()
 }
 
 // Saves and the shader cache live next to the "game" folder (the working directory when
-// the game's path is given on the command line). On the PS5, everything is in the title's
-// own folder (/data/homebrew/PPSA99862, which it sees as /app0): a title can't write to
-// /data outside it.
+// the game's path is given on the command line). On the consoles, everything is in the
+// program's own folder: on the PS5 the title's (/data/homebrew/PPSA99862, which it sees as
+// /app0; a title can't write to /data outside it), on the Switch 2 the NRO's folder on the
+// SD card.
 #if defined(__PROSPERO__)
-static const std::filesystem::path PS5_USER_PATH = "/app0";
-static std::filesystem::path g_userPath = PS5_USER_PATH;
+static const std::filesystem::path CONSOLE_USER_PATH = "/app0";
+static const char CONSOLE_GAME_FOLDER[] = "/data/homebrew/PPSA99862/game";
+#elif defined(__SWITCH2__)
+static const std::filesystem::path CONSOLE_USER_PATH = "sdmc:/switch/NaughtyBearRecomp";
+static const char CONSOLE_GAME_FOLDER[] = "/switch/NaughtyBearRecomp/game on the SD card";
+#endif
+#if defined(NB_CONSOLE)
+static std::filesystem::path g_userPath = CONSOLE_USER_PATH;
 #else
 static std::filesystem::path g_userPath = std::filesystem::current_path();
 #endif
@@ -61,6 +71,12 @@ std::filesystem::path GetSavePath(bool checkForMods)
     return g_userPath / "save";
 }
 
+#if defined(__SWITCH2__)
+// Faults reach libnx's exception handler, not signals (src/os/crash_switch2.cpp).
+static void InstallCrashHandler()
+{
+}
+#else
 static void OnCrash(int sig, siginfo_t* info, void*)
 {
     auto addr = reinterpret_cast<uintptr_t>(info->si_addr);
@@ -71,18 +87,10 @@ static void OnCrash(int sig, siginfo_t* info, void*)
     else
         snprintf(message, sizeof(message), "signal %d: host address %p", sig, info->si_addr);
     fprintf(stderr, "\n[nb] %s\n", message);
-#if defined(__PROSPERO__)
+#if defined(NB_CONSOLE)
     os::process::ShowMessage(std::string("Naughty Bear Recompiled crashed (") + message + "). See log.txt in its folder.");
 #endif
     os::process::Exit(128 + sig);
-}
-
-// Logs a fatal error, shows it to the player and ends.
-[[noreturn]] static void Fail(const std::string& message)
-{
-    LOGN_ERROR(message);
-    os::process::ShowMessage("Naughty Bear Recompiled: " + message);
-    os::process::Exit(EXIT_FAILURE);
 }
 
 static void InstallCrashHandler()
@@ -92,6 +100,15 @@ static void InstallCrashHandler()
     sa.sa_flags = SA_SIGINFO;
     for (int sig : { SIGSEGV, SIGBUS, SIGILL, SIGTRAP, SIGFPE, SIGSYS })
         sigaction(sig, &sa, nullptr);
+}
+#endif
+
+// Logs a fatal error, shows it to the player and ends.
+[[noreturn]] static void Fail(const std::string& message)
+{
+    LOGN_ERROR(message);
+    os::process::ShowMessage("Naughty Bear Recompiled: " + message);
+    os::process::Exit(EXIT_FAILURE);
 }
 
 static void KiSystemStartup()
@@ -152,14 +169,14 @@ static uint32_t LdrLoadModule(const std::filesystem::path& path)
 }
 
 // Finds Default.xex in a "game" folder (searched with its subfolders) next to the executable,
-// in the working directory, or in a parent of the executable's folder. On the PS5, in the
-// game folder in the title's own folder.
+// in the working directory, or in a parent of the executable's folder. On the consoles, in
+// the game folder in the program's own folder.
 static std::filesystem::path FindGameExecutable()
 {
     std::error_code ec;
     std::vector<std::filesystem::path> roots;
-#if defined(__PROSPERO__)
-    roots = { PS5_USER_PATH / "game" };
+#if defined(NB_CONSOLE)
+    roots = { CONSOLE_USER_PATH / "game" };
 #else
     auto executableDir = std::filesystem::read_symlink("/proc/self/exe", ec).parent_path();
     if (!ec)
@@ -202,12 +219,12 @@ static std::filesystem::path FindGameExecutable()
 
 int main(int argc, char** argv)
 {
-#if defined(__PROSPERO__)
-    // The log goes to a file the player can read over FTP. The game folder is created too, so
-    // there's a place to copy the game's files to.
+#if defined(NB_CONSOLE)
+    // The log goes to a file the player can read (over FTP, or from the SD card). The game
+    // folder is created too, so there's a place to copy the game's files to.
     std::error_code directoryError;
-    std::filesystem::create_directories(PS5_USER_PATH / "game", directoryError);
-    freopen((PS5_USER_PATH / "log.txt").c_str(), "w", stdout);
+    std::filesystem::create_directories(CONSOLE_USER_PATH / "game", directoryError);
+    freopen((CONSOLE_USER_PATH / "log.txt").c_str(), "w", stdout);
     dup2(fileno(stdout), fileno(stderr));
 #endif
     os::logger::Init();
@@ -237,13 +254,13 @@ int main(int argc, char** argv)
         xexPath = FindGameExecutable();
         if (xexPath.empty())
         {
-#if defined(__PROSPERO__)
-            Fail("Could not find the game: copy its files (the folder with Default.xex) into /data/homebrew/PPSA99862/game.");
+#if defined(NB_CONSOLE)
+            Fail(std::string("Could not find the game: copy its files (the folder with Default.xex) into ") + CONSOLE_GAME_FOLDER + ".");
 #else
             Fail("Could not find the game: put its files (with Default.xex) in a \"game\" folder next to the executable.");
 #endif
         }
-#if !defined(__PROSPERO__)
+#if !defined(NB_CONSOLE)
         for (auto dir = xexPath.parent_path(); dir.has_relative_path(); dir = dir.parent_path())
         {
             if (dir.filename() == "game")
@@ -266,7 +283,7 @@ int main(int argc, char** argv)
     if (entry == 0)
         Fail("Could not load " + xexPath.string());
 
-#if defined(__PROSPERO__)
+#if defined(NB_CONSOLE)
     // No window or mods menu: the renderer presents straight to the display. The main
     // thread applies rumble; the game runs on its own thread.
     if (!Video::Init(nullptr))
@@ -278,11 +295,23 @@ int main(int argc, char** argv)
             LOGN("Entry point returned.");
             os::process::Exit(EXIT_SUCCESS);
         });
+#if defined(__SWITCH2__)
+    // appletMainLoop also handles the system's messages, and says when to close (from the
+    // HOME Menu).
+    while (appletMainLoop())
+    {
+        hid::Update();
+        std::this_thread::sleep_for(std::chrono::milliseconds(8));
+    }
+    LOGN("Closing (the system asked).");
+    os::process::Exit(EXIT_SUCCESS);
+#else
     while (true)
     {
         hid::Update();
         std::this_thread::sleep_for(std::chrono::milliseconds(8));
     }
+#endif
 #else
     // SDL wants its window and events on the main thread, so the game gets its own.
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMECONTROLLER) != 0)

@@ -1,0 +1,84 @@
+diff --git a/XenosRecomp/shader_recompiler.cpp b/XenosRecomp/shader_recompiler.cpp
+index 7dc7ed4..924ded3 100644
+--- a/XenosRecomp/shader_recompiler.cpp
++++ b/XenosRecomp/shader_recompiler.cpp
+@@ -1485,6 +1485,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+             auto definition = reinterpret_cast<const Int4Definition*>(definitions);
+             for (uint16_t i = 0; i < definition->count; i++)
+             {
++                // (Named structs: GCC doesn't allow anonymous ones in an anonymous union.)
+                 union
+                 {
+                     uint32_t value;
+@@ -1494,13 +1495,13 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                         int8_t y;
+                         int8_t z;
+                         int8_t w;
+-                    };
++                    } bytes;
+                 };
+ 
+                 value = definition->values[i].get();
+ 
+                 println("\tint4 i{} = int4({}, {}, {}, {});",
+-                    (definition->registerIndex - 8992) / 4 + i, x, y, z, w);
++                    (definition->registerIndex - 8992) / 4 + i, bytes.x, bytes.y, bytes.z, bytes.w);
+             }
+             definitions += 2;
+             definitions += definition->count;
+@@ -1598,7 +1599,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+             uint32_t code1;
+             uint32_t code2;
+             uint32_t code3;
+-        };
++        } cfWords;
+     };
+ 
+     auto controlFlowCode = code;
+@@ -1608,10 +1609,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+ 
+     while (instrAddress < instrSize)
+     {
+-        code0 = controlFlowCode[0];
+-        code1 = controlFlowCode[1] & 0xFFFF;
+-        code2 = (controlFlowCode[1] >> 16) | (controlFlowCode[2] << 16);
+-        code3 = controlFlowCode[2] >> 16;
++        cfWords.code0 = controlFlowCode[0];
++        cfWords.code1 = controlFlowCode[1] & 0xFFFF;
++        cfWords.code2 = (controlFlowCode[1] >> 16) | (controlFlowCode[2] << 16);
++        cfWords.code3 = controlFlowCode[2] >> 16;
+ 
+         for (auto& cfInstr : controlFlow)
+         {
+@@ -1675,10 +1676,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+ 
+     while (instrAddress < instrSize)
+     {
+-        code0 = controlFlowCode[0];
+-        code1 = controlFlowCode[1] & 0xFFFF;
+-        code2 = (controlFlowCode[1] >> 16) | (controlFlowCode[2] << 16);
+-        code3 = controlFlowCode[2] >> 16;
++        cfWords.code0 = controlFlowCode[0];
++        cfWords.code1 = controlFlowCode[1] & 0xFFFF;
++        cfWords.code2 = (controlFlowCode[1] >> 16) | (controlFlowCode[2] << 16);
++        cfWords.code3 = controlFlowCode[2] >> 16;
+ 
+         for (auto& cfInstr : controlFlow)
+         {
+@@ -1833,12 +1834,12 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                         uint32_t code0;
+                         uint32_t code1;
+                         uint32_t code2;
+-                    };
++                    } words;
+                 };
+             
+-                code0 = instructionCode[0];
+-                code1 = instructionCode[1];
+-                code2 = instructionCode[2];
++                words.code0 = instructionCode[0];
++                words.code1 = instructionCode[1];
++                words.code2 = instructionCode[2];
+             
+                 if ((sequence & 0x1) != 0)
+                 {

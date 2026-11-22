@@ -6,7 +6,7 @@
 // most recently used controller combined with the keyboard; other players report no
 // controller connected.
 
-#if !defined(__PROSPERO__) // (the PS5 has hid_ps5.cpp)
+#if !defined(NB_CONSOLE) // (the consoles have hid_ps5.cpp and hid_switch2.cpp)
 
 #include <stdafx.h>
 #include <hid/hid.h>

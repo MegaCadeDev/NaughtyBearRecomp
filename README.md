@@ -8,8 +8,10 @@ the Xbox 360 kernel, graphics, audio and input.
 
 Roadmap:
 1. PC port (Linux first). **Playable.**
-2. PS5 homebrew port (title PPSA99862). **Builds; not yet tested on a console.** See
+2. PS5 homebrew port (title PPSA99862). **Runs on a console.** See
    [ps5/README.md](ps5/README.md).
+3. Switch 2 homebrew port (an NRO for kaiHEN). **Builds; not yet tested on a console.** See
+   [switch2/README.md](switch2/README.md).
 
 No game data is included. You need your own legally dumped copy of the game.
 
@@ -136,7 +138,7 @@ translated game to `generated/ppc` (not in the repository). The CMake build comp
 with the runtime, and builds FFmpeg's XMA decoder from `thirdparty/FFmpeg`.
 `libdxcompiler.so` (the shader compiler) is copied next to the executable.
 
-`tools/package-release.sh` builds and packages the PC and PS5 versions for a release, and
+`tools/package-release.sh` builds and packages the PC, PS5 and Switch 2 versions for a release, and
 the Release workflow runs it on a self-hosted runner for each version tag: see
 [docs/releasing.md](docs/releasing.md).
 
@@ -157,6 +159,7 @@ the Release workflow runs it on a self-hosted runner for each version tag: see
 | `tools/` | Recompilation and shader scripts; `tools/nbanalyse` has the reverse-engineering tools |
 | `docs/` | How it works: [runtime](docs/runtime.md), [graphics](docs/d3d_map.md) |
 | `ps5/` | The PS5 version's build, packaging and deployment ([ps5/README.md](ps5/README.md)) |
+| `switch2/` | The Switch 2 version's build and packaging ([switch2/README.md](switch2/README.md)) |
 
 ## License
 

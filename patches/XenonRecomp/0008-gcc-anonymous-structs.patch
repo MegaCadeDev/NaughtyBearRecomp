@@ -1,0 +1,42 @@
+diff --git a/XenonUtils/xbox.h b/XenonUtils/xbox.h
+index 0361b0f..ed376cb 100644
+--- a/XenonUtils/xbox.h
++++ b/XenonUtils/xbox.h
+@@ -241,6 +241,7 @@ typedef struct _XOVERLAPPED {
+ 
+ // this name is so dumb
+ typedef struct _XXOVERLAPPED {
++#if defined(__clang__) || defined(_MSC_VER)
+     union
+     {
+         struct
+@@ -255,6 +256,11 @@ typedef struct _XXOVERLAPPED {
+             uint32_t InternalHigh;
+         };
+     };
++#else
++    // GCC doesn't allow members with constructors (be<>) in anonymous structs.
++    be<uint32_t> Error;
++    be<uint32_t> Length;
++#endif
+     uint32_t InternalContext;
+     be<uint32_t> hEvent;
+     be<uint32_t> pCompletionRoutine;
+diff --git a/XenonUtils/xdbf.h b/XenonUtils/xdbf.h
+index 347ac2c..68b4856 100644
+--- a/XenonUtils/xdbf.h
++++ b/XenonUtils/xdbf.h
+@@ -128,11 +128,13 @@ struct XACHEntry
+ 
+ union XDBFTitleID
+ {
++#if defined(__clang__) || defined(_MSC_VER)
+     struct
+     {
+         be<uint16_t> u16;
+         char u8[0x02];
+     };
++#endif
+ 
+     be<uint32_t> u32;
+ };

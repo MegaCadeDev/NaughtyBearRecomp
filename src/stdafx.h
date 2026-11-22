@@ -4,13 +4,14 @@
 
 #define NOMINMAX
 
-#if defined(__linux__) || defined(__PROSPERO__)
+#if defined(__linux__) || defined(__PROSPERO__) || defined(__SWITCH__)
 #include <unistd.h>
 #include <pwd.h>
 #endif
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cassert>
 #include <charconv>
 #include <chrono>

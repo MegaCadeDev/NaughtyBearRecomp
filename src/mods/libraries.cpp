@@ -1,7 +1,7 @@
 // Implementations of the single-header libraries mod support uses: cgltf (glTF models),
 // stb_image (their textures) and stb_image_write (textures exported for modders).
 #define CGLTF_IMPLEMENTATION
-#if !defined(__PROSPERO__) // the PS5 version has no mods
+#if !defined(NB_CONSOLE) // the console versions have no mods
 
 #include <cgltf.h>
 

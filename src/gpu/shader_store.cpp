@@ -150,7 +150,7 @@ namespace shader_store
         std::vector<std::pair<uint64_t, std::vector<uint8_t>>> work(found.begin(), found.end());
         std::atomic<size_t> next = 0, done = 0, failed = 0;
         std::atomic<uint32_t> finishedWorkers = 0;
-        uint32_t threadCount = std::max(1u, std::thread::hardware_concurrency());
+        uint32_t threadCount = GetHostCoreCount();
         for (uint32_t t = 0; t < threadCount; t++)
         {
             StartHostThread([&]

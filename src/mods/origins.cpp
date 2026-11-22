@@ -1,4 +1,4 @@
-#if !defined(__PROSPERO__) // the PS5 version has no mods
+#if !defined(NB_CONSOLE) // the console versions have no mods
 
 #include <stdafx.h>
 #include "origins.h"

@@ -18,7 +18,7 @@
 #include <kernel/memory.h>
 #include <mods/mods.h>
 #include <mods/origins.h>
-#if !defined(__PROSPERO__)
+#if !defined(NB_CONSOLE)
 #include <stb_image_write.h>
 #endif
 #include <os/logger.h>
@@ -43,7 +43,7 @@ using namespace plume;
 
 namespace plume
 {
-#if defined(__PROSPERO__)
+#if defined(NB_CONSOLE)
     extern std::unique_ptr<RenderInterface> CreateVulkanInterface();
 #else
     extern std::unique_ptr<RenderInterface> CreateVulkanInterface(RenderWindow sdlWindow);
@@ -2291,7 +2291,7 @@ namespace
             textures += fmt::format(" {}:{}x{}", i, (fetch[2] & 0x1FFF) + 1, ((fetch[2] >> 13) & 0x1FFF) + 1);
             uint32_t width = 0, height = 0;
             std::vector<uint8_t> rgba;
-#if !defined(__PROSPERO__)
+#if !defined(NB_CONSOLE)
             if (ReadTextureRGBA(fetch, width, height, rgba))
                 stbi_write_png((directory / fmt::format("{:016x}_texture{}.png", id, i)).string().c_str(), int(width), int(height), 4, rgba.data(),
                     int(width * 4));
@@ -3195,7 +3195,7 @@ namespace
 
 bool Video::Init(SDL_Window* window)
 {
-#if defined(__PROSPERO__)
+#if defined(NB_CONSOLE)
     (void)window;
     RenderWindow renderWindow{};
     g_interface = CreateVulkanInterface();

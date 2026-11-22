@@ -1,22 +1,23 @@
 # Releasing
 
-`tools/package-release.sh` builds both versions from a clean recompile and packages them in
-`out/release`:
+`tools/package-release.sh` builds the PC, PS5 and Switch 2 versions from a clean recompile
+and packages them in `out/release`:
 
 | File | Contents |
 |-|-|
 | `NaughtyBearRecomp-<version>-linux-x64.tar.gz` | The PC version: `NaughtyBear`, `libdxcompiler.so`, README, NOTICE, modding guide, an empty `game` folder |
 | `NaughtyBearRecomp-<version>-ps5-PPSA99862.zip` | The PS5 title folder, for `/data/homebrew/PPSA99862` |
+| `NaughtyBearRecomp-<version>-switch2.zip` | The Switch 2 NRO in its folder, for the SD card's `/switch` |
 | `SHA256SUMS`, `RELEASE_NOTES.md` | Checksums, and the release's description |
 
-Neither package contains the game's files. The script fails if one holds an executable,
+No package contains the game's files. The script fails if one holds an executable,
 package, shader cache, save or mod. Players copy in their own game.
 
 ```bash
 tools/package-release.sh v1.0.0
 ```
 
-`--pc-only` or `--ps5-only` builds one of the two.
+`--pc-only`, `--ps5-only` or `--switch2-only` builds one of them.
 
 ## The release workflow
 
@@ -41,8 +42,8 @@ machines would need the game's `Default.xex` uploaded to them; this way it stays
      between runs, for example `/home/you/.cache/nb-ps5-deps`. Without it, every release
      rebuilds them (RADV, FFmpeg, DXC: an hour or more). You can copy an existing `ps5/.deps`
      there to start.
-4. The machine needs what the PC and PS5 builds need already (see the main README and
-   `ps5/README.md`), plus `zip`.
+4. The machine needs what the PC, PS5 and Switch 2 builds need already (see the main README,
+   `ps5/README.md` and `switch2/README.md`), plus `zip` and Docker.
 
 The workflow only starts from a pushed tag or by hand, never from pull requests, so other
 people's code doesn't run on your machine. Keep it that way: don't add `pull_request`

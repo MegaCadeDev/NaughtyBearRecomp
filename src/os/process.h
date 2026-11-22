@@ -12,10 +12,11 @@ namespace os::process
     void CheckConsole();
     void ShowConsole();
 
-    // Shows a short message to the player: a system notification on the PS5, nothing
-    // elsewhere (it's in the log).
+    // Shows a short message to the player: a system notification on the PS5, the error
+    // screen on the Switch 2, nothing elsewhere (it's in the log).
     void ShowMessage(std::string_view message);
 
     // Ends the process. A PS5 title has to ask the system to close it: exit() raises SIGSYS.
+    // On the Switch 2 the process ends, back to the HOME Menu.
     [[noreturn]] void Exit(int code);
 }
