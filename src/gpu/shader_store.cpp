@@ -154,6 +154,26 @@ namespace shader_store
         uint32_t threadCount = GetHostCoreCount();
         LOGFN("Shaders: found {} ({} in the executable) in {} packages; translating on {} threads", work.size(), executableShaders,
             packageFiles.size(), threadCount);
+#if defined(__SWITCH2__)
+        // The first one alone, on this thread, step by step: if it faults, the log says where
+        // (kaiHEN doesn't pass exceptions to the program); if only the threads together fault,
+        // it's something they share.
+        if (!work.empty())
+        {
+            std::vector<uint8_t> spirv;
+            uint32_t mask = 0;
+            std::string error;
+            shader_translator::TraceSteps(true);
+            if (shader_translator::Translate(work[0].second.data(), spirv, mask, error))
+                Insert(work[0].first, std::move(spirv), mask);
+            else
+                LOGFN_WARNING("Shaders: {:016x} could not be translated: {}", work[0].first, error);
+            shader_translator::TraceSteps(false);
+            LOGN("Shaders: the first one translated alone; now on all threads");
+            next = 1;
+            done = 1;
+        }
+#endif
         for (uint32_t t = 0; t < threadCount; t++)
         {
             StartHostThread([&]

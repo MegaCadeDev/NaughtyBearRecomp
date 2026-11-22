@@ -18,4 +18,8 @@ namespace shader_translator
 
     // Changes whenever translated shaders would change (the translator or its HLSL header).
     uint64_t Version();
+
+    // Logs each step of the translations on this thread (to stderr), for finding a fault on
+    // a system that can't report one (the Switch 2 under kaiHEN).
+    void TraceSteps(bool enabled);
 }

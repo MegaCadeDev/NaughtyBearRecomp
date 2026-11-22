@@ -7,6 +7,19 @@
 
 namespace shader_translator
 {
+    static thread_local bool g_traceSteps = false;
+
+    void TraceSteps(bool enabled)
+    {
+        g_traceSteps = enabled;
+    }
+
+    static void Step(const char* step, size_t value = 0)
+    {
+        if (g_traceSteps)
+            fprintf(stderr, "[translator] %s (%zu)\n", step, value);
+    }
+
     // Bump when the generated code changes for reasons other than the patches or the header.
     constexpr uint64_t TRANSLATOR_REVISION = 1;
 
@@ -42,13 +55,17 @@ namespace shader_translator
             error = fmt::format("DXC could not start (0x{:08X})", uint32_t(available));
             return false;
         }
+        Step("DXC available");
 
         ShaderRecompiler recompiler;
         recompiler.recompile(container, std::string_view(SHADER_COMMON_TEXT));
         specConstantsMask = recompiler.specConstantsMask;
+        Step("HLSL written, characters", recompiler.out.size());
 
         thread_local DxcCompiler compiler;
+        Step("compiler ready; compiling");
         IDxcBlob* blob = compiler.compile(recompiler.out, recompiler.isPixelShader, false, true);
+        Step("compiled", blob != nullptr ? blob->GetBufferSize() : 0);
         if (blob == nullptr)
         {
             error = "DXC could not compile the translated shader";

@@ -18,7 +18,7 @@ build="$root/.deps/work/dxc-switch2"
 prefix="$root/.deps/dxc"
 logs="$root/.deps/work"
 
-if [[ -f $prefix/.version && $(<"$prefix/.version") == "$version" ]]; then
+if [[ -f $prefix/.version && $(<"$prefix/.version") == "$version+switch-locale" ]]; then
     exit 0
 fi
 
@@ -38,6 +38,19 @@ fi
 git -C "$source" submodule update --init --recursive -q
 # dxcompiler as a static library (only in this checkout, which the build owns).
 sed -i 's/^add_clang_library(dxcompiler SHARED /add_clang_library(dxcompiler STATIC /' "$source/tools/clang/tools/dxcompiler/CMakeLists.txt"
+# DXC converts its wide strings after setlocale(LC_ALL, "en_US.UTF-8") and puts the old
+# locale back, around every conversion: process-wide changes, so translations on several
+# threads change it under each other. newlib's default locale converts the ASCII shaders
+# DXC handles, so on the Switch the locale is left alone.
+grep -q "__SWITCH__" "$source/lib/DxcSupport/Unicode.cpp" || sed -i \
+    -e 's/^  const char \*prevLocale = setlocale(LC_ALL, nullptr);$/#ifndef __SWITCH__\n  const char *prevLocale = setlocale(LC_ALL, nullptr);/' \
+    -e 's/^  setlocale(LC_ALL, "en_US.UTF-8");$/  setlocale(LC_ALL, "en_US.UTF-8");\n#endif/' \
+    -e 's/^  if (prevLocale)$/#ifndef __SWITCH__\n  if (prevLocale)/' \
+    -e 's/^    setlocale(LC_ALL, prevLocale);$/    setlocale(LC_ALL, prevLocale);\n#endif/' \
+    "$source/lib/DxcSupport/Unicode.cpp"
+# The checkout's version stamp, so the libraries are rebuilt after the source changes.
+dxc_version="$version+switch-locale"
+
 # SPIRV-Tools lists the systems it builds for: the Switch is built as FreeBSD (which only
 # decides whether its timers are on).
 grep -q NintendoSwitch "$source/external/SPIRV-Tools/CMakeLists.txt" || sed -i \
@@ -72,5 +85,5 @@ rm -rf "$prefix"
 mkdir -p "$prefix/lib" "$prefix/include"
 cp "$build"/lib/*.a "$prefix/lib/"
 cp -r "$source/include/dxc" "$prefix/include/"
-printf '%s\n' "$version" > "$prefix/.version"
+printf '%s\n' "$dxc_version" > "$prefix/.version"
 echo "==> [dxc] built DXC $version into $prefix"
