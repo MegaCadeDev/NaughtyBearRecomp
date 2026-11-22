@@ -144,7 +144,12 @@ namespace
 
     constexpr uint32_t PRESENT_WIDTH = 1280;
     constexpr uint32_t PRESENT_HEIGHT = 720;
+#if defined(__SWITCH2__)
+    // OunceVK's display layer has no BGRA format.
+    constexpr RenderFormat BACKBUFFER_FORMAT = RenderFormat::R8G8B8A8_UNORM;
+#else
     constexpr RenderFormat BACKBUFFER_FORMAT = RenderFormat::B8G8R8A8_UNORM;
+#endif
     constexpr uint32_t BUFFER_COUNT = 2;
     constexpr uint32_t TEXTURE_DESCRIPTOR_SIZE = 65536;
     constexpr uint32_t SAMPLER_DESCRIPTOR_SIZE = 1024;

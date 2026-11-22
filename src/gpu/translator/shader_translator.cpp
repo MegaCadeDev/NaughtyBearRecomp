@@ -27,6 +27,22 @@ namespace shader_translator
 
     bool Translate(const uint8_t* container, std::vector<uint8_t>& spirv, uint32_t& specConstantsMask, std::string& error)
     {
+        // DxcCompiler only asserts that DXC started (nothing, in a release build), then uses
+        // it: check once that it can.
+        static const HRESULT available = []
+            {
+                IDxcCompiler3* compiler = nullptr;
+                HRESULT result = DxcCreateInstance(CLSID_DxcCompiler, IID_PPV_ARGS(&compiler));
+                if (compiler != nullptr)
+                    compiler->Release();
+                return compiler != nullptr ? result : E_FAIL;
+            }();
+        if (FAILED(available))
+        {
+            error = fmt::format("DXC could not start (0x{:08X})", uint32_t(available));
+            return false;
+        }
+
         ShaderRecompiler recompiler;
         recompiler.recompile(container, std::string_view(SHADER_COMMON_TEXT));
         specConstantsMask = recompiler.specConstantsMask;

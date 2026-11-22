@@ -26,7 +26,7 @@ index 1bd6989..ecf0b98 100644
          bool operator==(const struct RenderWindow& rhs) const { return true; }
          bool operator!=(const struct RenderWindow& rhs) const { return false; }
 diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
-index 6504527..036bc05 100644
+index 6504527..f5a7bfb 100644
 --- a/plume_vulkan.cpp
 +++ b/plume_vulkan.cpp
 @@ -27,15 +27,19 @@
@@ -95,7 +95,19 @@ index 6504527..036bc05 100644
  #   elif defined(__linux__)
          assert(renderWindow.display != 0);
          assert(renderWindow.window != 0);
-@@ -2545,7 +2569,7 @@ namespace plume {
+@@ -2293,6 +2317,11 @@ namespace plume {
+ 
+         if (compatibleSurfaceFormats.empty()) {
+             fprintf(stderr, "No compatible surface formats were found.\n");
++#   if defined(__SWITCH2__)
++            for (const VkSurfaceFormatKHR &surfaceFormat : surfaceFormats) {
++                fprintf(stderr, "  surface format %d, color space %d\n", surfaceFormat.format, surfaceFormat.colorSpace);
++            }
++#   endif
+             return;
+         }
+ 
+@@ -2545,7 +2574,7 @@ namespace plume {
  #   elif defined(__ANDROID__)
          dstWidth = ANativeWindow_getWidth(renderWindow);
          dstHeight = ANativeWindow_getHeight(renderWindow);
@@ -104,7 +116,7 @@ index 6504527..036bc05 100644
          dstWidth = displayExtent.width;
          dstHeight = displayExtent.height;
  #   elif defined(__linux__)
-@@ -4528,8 +4552,8 @@ namespace plume {
+@@ -4528,8 +4557,8 @@ namespace plume {
  #else
      VulkanInterface::VulkanInterface() {
  #endif

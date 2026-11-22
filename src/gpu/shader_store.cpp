@@ -163,7 +163,19 @@ namespace shader_store
                         std::vector<uint8_t> spirv;
                         uint32_t mask = 0;
                         std::string error;
-                        if (shader_translator::Translate(work[index].second.data(), spirv, mask, error))
+#if defined(__SWITCH2__)
+                        // The first translations are logged: a fault there ends the process
+                        // without a report (kaiHEN doesn't pass exceptions to the program).
+                        bool logged = index < 2 * threadCount;
+                        if (logged)
+                            LOGFN("Shaders: translating {} ({:016x})", index, work[index].first);
+#endif
+                        bool translated = shader_translator::Translate(work[index].second.data(), spirv, mask, error);
+#if defined(__SWITCH2__)
+                        if (logged)
+                            LOGFN("Shaders: {} {} ({} bytes of SPIR-V)", index, translated ? "done" : "failed", spirv.size());
+#endif
+                        if (translated)
                             Insert(work[index].first, std::move(spirv), mask);
                         else
                         {
